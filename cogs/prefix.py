@@ -1,6 +1,10 @@
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+import embeds
 from prefixes import (
     DEFAULT_PREFIX,
     clear_prefix,
@@ -9,6 +13,8 @@ from prefixes import (
     set_prefix,
     validate,
 )
+
+log = logging.getLogger(__name__)
 
 
 def can_manage(member: discord.Member) -> bool:
@@ -30,20 +36,43 @@ def owner_or_admin():
 
 
 class Prefix(commands.Cog):
+    """Set the prefix the bot answers to in this server."""
+
     def __init__(self, bot):
         self.bot = bot
 
     async def cog_command_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send(
-                "Only the server owner or an administrator can change the prefix."
+        if isinstance(error, commands.NoPrivateMessage):
+            await embeds.send(
+                ctx, embeds.error("this command only works in a server.")
             )
-        elif isinstance(error, commands.NoPrivateMessage):
-            await ctx.send("This command only works in a server.")
-        elif isinstance(error, commands.CommandOnCooldown):
-            await ctx.send(f"Slow down, try again in {error.retry_after:.0f}s.")
-        else:
-            await ctx.send(f"Something went wrong: {error}")
+            return
+
+        if isinstance(error, commands.MissingPermissions):
+            await embeds.send(
+                ctx,
+                embeds.error(
+                    "only the server owner or an administrator can change "
+                    "the prefix.",
+                    title="Not allowed",
+                ),
+            )
+            return
+
+        if isinstance(error, commands.CommandOnCooldown):
+            await embeds.send(
+                ctx,
+                embeds.error(
+                    f"try again in {error.retry_after:.0f}s.",
+                    title="Slow down",
+                ),
+            )
+            return
+
+        log.exception("Unhandled error in %s", ctx.command, exc_info=error)
+        await embeds.send(
+            ctx, embeds.error("something broke on my end. it has been logged.")
+        )
 
     @commands.hybrid_group(
         name="prefix",
@@ -56,28 +85,25 @@ class Prefix(commands.Cog):
         current = prefix_for(ctx.guild.id)
         origin = "custom" if is_custom(ctx.guild.id) else "the default"
 
-        description = [
-            f"The prefix here is `{current}` ({origin}).",
-            "",
-            f"`{current}prefix set <new>` - change it",
-            f"`{current}prefix reset` - go back to `{DEFAULT_PREFIX}`",
-            "",
-            f"{self.bot.user.mention} also works as a prefix at any time, "
-            "so you can always get back if a prefix stops working.",
-        ]
-
-        if not can_manage(ctx.author):
-            description.append("")
-            description.append(
-                "Changing it needs the server owner or an administrator."
-            )
-
-        embed = discord.Embed(
-            title="Command Prefix",
-            description="\n".join(description),
-            color=discord.Color.dark_theme(),
+        embed = embeds.build(
+            f"the prefix here is `{current}` ({origin}).",
+            title="Command prefix",
         )
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        embed.add_field(
+            name="Changing it",
+            value=(
+                f"`{current}prefix set <new>` — set a new prefix\n"
+                f"`{current}prefix reset` — go back to `{DEFAULT_PREFIX}`"
+            ),
+            inline=False,
+        )
+
+        footer = "Mentioning me always works as a prefix too."
+        if not can_manage(ctx.author):
+            footer += " Only the owner or an administrator can change it."
+        embed.set_footer(text=footer)
+
+        await embeds.send(ctx, embed)
 
     @prefix.command(name="set", description="Change the prefix for this server.")
     @app_commands.describe(new="The new prefix, quoted if it ends in a space")
@@ -87,18 +113,24 @@ class Prefix(commands.Cog):
         value, problem = validate(new)
 
         if problem:
-            await ctx.send(problem)
+            await embeds.send(ctx, embeds.error(problem, title="Invalid prefix"))
             return
 
         current = prefix_for(ctx.guild.id)
         if value == current:
-            await ctx.send(f"The prefix is already `{value}`.")
+            await embeds.send(
+                ctx, embeds.notice(f"the prefix is already `{value}`.")
+            )
             return
 
         set_prefix(ctx.guild.id, value)
 
-        await ctx.send(
-            f"Prefix changed to `{value}`. Try `{value}help`."
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                f"the prefix is now `{value}`. try `{value}help`.",
+                title="Prefix updated",
+            ),
         )
 
     @prefix.command(
@@ -111,10 +143,21 @@ class Prefix(commands.Cog):
         removed = clear_prefix(ctx.guild.id)
 
         if removed is None:
-            await ctx.send(f"The prefix is already the default `{DEFAULT_PREFIX}`.")
+            await embeds.send(
+                ctx,
+                embeds.notice(
+                    f"the prefix is already the default `{DEFAULT_PREFIX}`."
+                ),
+            )
             return
 
-        await ctx.send(f"Prefix reset to `{DEFAULT_PREFIX}`.")
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                f"the prefix is back to `{DEFAULT_PREFIX}`.",
+                title="Prefix reset",
+            ),
+        )
 
 
 async def setup(bot):

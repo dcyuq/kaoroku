@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from pathlib import Path
 from prefixes import resolve_prefix
+import embeds
 import os
 import asyncio
 
@@ -16,6 +17,8 @@ COGS_DIR = ROOT / "cogs"
 
 load_dotenv(ROOT / ".env")
 token = os.getenv("DISCORD_TOKEN")
+
+log = logging.getLogger(BOT_NAME)
 
 handler = RotatingFileHandler(
     filename=ROOT / "discord.log",
@@ -68,34 +71,66 @@ async def on_command_error(ctx, error):
     error = unwrap(error)
 
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"Missing argument: `{error.param.name}`")
-        return
-    if isinstance(error, (commands.MissingPermissions, commands.CheckFailure)):
-        await ctx.send("You don't have permission to use that.")
-        return
-    if isinstance(error, commands.CommandOnCooldown):
-        await ctx.send(f"Slow down, try again in {error.retry_after:.0f}s.")
+        await embeds.send(
+            ctx,
+            embeds.error(
+                f"Missing argument: `{error.param.name}`.",
+                title="Missing argument",
+            ),
+        )
         return
 
-    await ctx.send(f"`{type(error).__name__}: {error}`")
-    raise error
+    if isinstance(error, commands.NoPrivateMessage):
+        await embeds.send(
+            ctx, embeds.error("This command only works in a server.")
+        )
+        return
+
+    if isinstance(error, commands.CommandOnCooldown):
+        await embeds.send(
+            ctx,
+            embeds.error(
+                f"Try again in {error.retry_after:.0f}s.", title="Slow down"
+            ),
+        )
+        return
+
+    if isinstance(error, (commands.MissingPermissions, commands.CheckFailure)):
+        await embeds.send(
+            ctx,
+            embeds.error(
+                "You do not have permission to use that.", title="Not allowed"
+            ),
+        )
+        return
+
+    log.exception(
+        "Unhandled error in %s", ctx.command, exc_info=error
+    )
+    await embeds.send(
+        ctx, embeds.error("Something broke on my end. It has been logged.")
+    )
 
 
 async def load_cogs():
-    loaded, failed = 0, 0
+    loaded, skipped, failed = 0, 0, 0
 
     for path in sorted(COGS_DIR.glob("*.py")):
         if path.name.startswith("_"):
             continue
         try:
             await bot.load_extension(f"cogs.{path.stem}")
-            print(f"  loaded  {path.name}")
+            print(f"  loaded   {path.name}")
             loaded += 1
+        except commands.NoEntryPointError:
+            # A helper module that wandered into cogs/. Not a cog, not a crash.
+            print(f"  skipped  {path.name}: no setup function")
+            skipped += 1
         except Exception as exc:
-            print(f"  FAILED  {path.name}: {type(exc).__name__}: {exc}")
+            print(f"  FAILED   {path.name}: {type(exc).__name__}: {exc}")
             failed += 1
 
-    print(f"Cogs: {loaded} loaded, {failed} failed")
+    print(f"Cogs: {loaded} loaded, {skipped} skipped, {failed} failed")
 
 
 async def main():
@@ -105,6 +140,7 @@ async def main():
 
     async with bot:
         discord.utils.setup_logging(handler=handler, level=logging.INFO)
+        embeds.install()
         await load_cogs()
         await bot.start(token)
 
@@ -113,4 +149,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"{BOT_NAME} shutting down.")
+        print(f"{BOT_NAME} shutting down.") 

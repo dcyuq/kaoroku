@@ -1,8 +1,18 @@
-import discord
+import logging
+
 from discord.ext import commands
+
+import embeds
+from prefixes import display_prefix
+
+log = logging.getLogger(__name__)
+
+DESCRIPTION_LIMIT = 4000
 
 
 class Sync(commands.Cog):
+    """Owner tools for pushing slash commands to Discord."""
+
     def __init__(self, bot):
         self.bot = bot
 
@@ -14,16 +24,29 @@ class Sync(commands.Cog):
     async def cog_command_error(self, ctx, error):
         if isinstance(error, commands.NotOwner):
             return
-        await ctx.send(f"Sync failed: {type(error).__name__}: {error}")
+
+        log.exception("Sync failed in %s", ctx.command, exc_info=error)
+        await embeds.send(
+            ctx,
+            embeds.error(
+                "the sync did not go through. check the log for details.",
+                title="Sync failed",
+            ),
+        )
 
     @commands.group(name="sync", invoke_without_command=True, hidden=True)
     async def sync(self, ctx):
         async with ctx.typing():
             synced = await self.bot.tree.sync()
-        await ctx.send(
-            f"Synced {len(synced)} commands globally. These can take up to "
-            f"an hour to show up everywhere. Use `{ctx.prefix}sync here` for "
-            "an instant test in this server."
+
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                f"synced {len(synced)} command(s) globally. global commands "
+                "can take up to an hour to appear everywhere. Use "
+                f"`{display_prefix(ctx)}sync here` for an instant test in this server.",
+                title="Synced",
+            ),
         )
 
     @sync.command(name="here", aliases=["guild"])
@@ -32,16 +55,28 @@ class Sync(commands.Cog):
         self.bot.tree.copy_global_to(guild=ctx.guild)
         async with ctx.typing():
             synced = await self.bot.tree.sync(guild=ctx.guild)
-        await ctx.send(f"Synced {len(synced)} command(s) to this server.")
+
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                f"synced {len(synced)} command(s) to this server.",
+                title="Synced",
+            ),
+        )
 
     @sync.command(name="clear")
     async def sync_clear(self, ctx):
         self.bot.tree.clear_commands(guild=None)
         async with ctx.typing():
             await self.bot.tree.sync()
-        await ctx.send(
-            "**Cleared** every global command. **Restart** the bot and run "
-            f"`{ctx.prefix}sync` to put them back."
+
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                "cleared every global command. restart the bot and run "
+                f"`{display_prefix(ctx)}sync` to put them back.",
+                title="Cleared",
+            ),
         )
 
     @sync.command(name="clearhere")
@@ -50,9 +85,14 @@ class Sync(commands.Cog):
         self.bot.tree.clear_commands(guild=ctx.guild)
         async with ctx.typing():
             await self.bot.tree.sync(guild=ctx.guild)
-        await ctx.send(
-            "Cleared the copies registered to this server. Global commands "
-            "are untouched."
+
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                "cleared the copies registered to this server. global "
+                "commands are untouched.",
+                title="Cleared",
+            ),
         )
 
     @sync.command(name="list")
@@ -60,12 +100,22 @@ class Sync(commands.Cog):
         names = sorted(
             command.qualified_name for command in self.bot.tree.walk_commands()
         )
+
         if not names:
-            await ctx.send("Nothing in the tree.")
+            await embeds.send(
+                ctx, embeds.notice("nothing in the tree.", title="Slash tree")
+            )
             return
 
         listed = ", ".join(f"`/{name}`" for name in names)
-        await ctx.send(f"{len(names)} in the tree: {listed}"[:2000])
+
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                listed[:DESCRIPTION_LIMIT],
+                title=f"Slash tree ({len(names)})",
+            ),
+        )
 
 
 async def setup(bot):

@@ -54,7 +54,7 @@ def validate(raw):
         value = value[1:-1]
 
     if not value.strip():
-        return None, "A prefix can't be empty."
+        return None, "A prefix cannot be empty."
 
     if len(value) > MAX_LENGTH:
         return None, f"Keep it to {MAX_LENGTH} characters or fewer."
@@ -63,17 +63,29 @@ def validate(raw):
 
     if any(ch.isspace() for ch in core):
         return None, (
-            "A prefix can't contain spaces. If you want a trailing space, "
-            'wrap it in quotes like "bei ".'
+            "A prefix cannot contain spaces. If you want a trailing space, "
+            'wrap it in quotes like "kao ".'
         )
 
     if value.startswith(RESERVED_STARTS):
         return None, (
-            "A prefix can't start with @, # or / since those collide with "
+            "A prefix cannot start with @, # or / since those collide with "
             "mentions, channels and slash commands."
         )
 
     return value, None
+
+
+def display_prefix(ctx):
+    """The prefix to show when telling someone to run another command.
+
+    ctx.prefix is whatever matched, and since mentioning the bot is always
+    a valid prefix that can be a raw `<@id>`. Slash invocations keep `/`,
+    everything else falls back to the guild's configured prefix.
+    """
+    if getattr(ctx, "interaction", None) is not None:
+        return "/"
+    return prefix_of(ctx)
 
 
 def resolve_prefix(bot, message):
