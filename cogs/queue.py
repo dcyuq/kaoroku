@@ -218,9 +218,40 @@ def order_values(guild, settings, order):
     return values
 
 
+# A url sitting in an embed description is only ever a link. Discord
+# renders an image inside an embed from set_image or set_thumbnail and
+# nowhere else, so the link has to be lifted out of the body first.
+# Masked links and <suppressed> links are left where they are.
+IMAGE_URL = re.compile(
+    r"(?<![(\[<])\bhttps?://[^\s<>()\[\]]+?"
+    r"\.(?:png|jpe?g|gif|webp|avif)"
+    r"(?:\?[^\s<>()\[\]]*)?",
+    re.IGNORECASE,
+)
+
+
+def split_image(body):
+    """Return (text without the image link, image url or None).
+
+    The last link wins, since a banner is normally written at the end of
+    the format.
+    """
+    matches = list(IMAGE_URL.finditer(body))
+    if not matches:
+        return body, None
+
+    last = matches[-1]
+    trimmed = body[: last.start()] + body[last.end() :]
+    return trimmed.strip(), last.group(0)
+
+
 def order_embed(guild, settings, order):
     body = render(settings["template"], order_values(guild, settings, order), guild)
-    embed = embeds.build(body[:4096])
+    body, image_url = split_image(body)
+    embed = embeds.build(body[:4096] or None)
+
+    if image_url:
+        embed.set_image(url=image_url)
 
     if order.get("updated_by"):
         member = guild.get_member(order["updated_by"]) if guild else None
@@ -369,10 +400,20 @@ class TemplateModal(discord.ui.Modal, title="Queue Format"):
                 "paste what discord gives you instead."
             )
 
+        _, banner = split_image(text)
+        if banner and "discordapp.com" in banner and "ex=" in banner:
+            notes.append(
+                "that image link is a discord attachment link, which stops "
+                "working after about a day. upload the image somewhere that "
+                "keeps it, or post it in a channel nobody deletes and use "
+                "that link instead."
+            )
+
         if notes:
             await interaction.followup.send(
                 embed=embeds.error(
-                    "saved. two things to check:\n\n" + "\n\n".join(notes)
+                    f"saved. {len(notes)} things to check:\n\n"
+                    + "\n\n".join(notes)
                     if len(notes) > 1
                     else "saved, but " + notes[0],
                     title="Check the format",
