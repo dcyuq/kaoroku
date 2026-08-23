@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 import uuid
 
@@ -117,6 +118,189 @@ DEFAULT_BUTTON = {
     "welcome": "Describe your issue and someone will be with you shortly.",
     "questions": [],
 }
+
+
+# --- icons ------------------------------------------------------------
+# modal text inputs have no emoji picker, so whatever gets typed arrives
+# as plain text. ":name:", "\:name:", "name", a pasted <:name:id>, or a
+# unicode emoji all have to end up as something a button can render.
+
+CUSTOM_TOKEN = re.compile(r"<(a?):([A-Za-z0-9_~]{2,32}):(\d{15,25})>")
+
+NAME_TOKEN = re.compile(r"^:?([A-Za-z0-9_~]{2,32}):?$")
+
+KEYCAP_HEADS = "0123456789#*"
+
+EMOJI_BASE = (
+    (0x00A9, 0x00A9),
+    (0x00AE, 0x00AE),
+    (0x203C, 0x2049),
+    (0x2122, 0x2122),
+    (0x2139, 0x2139),
+    (0x2194, 0x21AA),
+    (0x231A, 0x231B),
+    (0x2328, 0x2328),
+    (0x23CF, 0x23FA),
+    (0x24C2, 0x24C2),
+    (0x25AA, 0x25FE),
+    (0x2600, 0x27BF),
+    (0x2934, 0x2935),
+    (0x2B00, 0x2BFF),
+    (0x3030, 0x3030),
+    (0x303D, 0x303D),
+    (0x3297, 0x3299),
+    (0x1F000, 0x1FAFF),
+)
+
+# joiners, variation selectors, skin tones and flag tags are never an
+# emoji on their own but are legal inside one.
+EMOJI_PARTS = (
+    (0x200D, 0x200D),
+    (0x20E3, 0x20E3),
+    (0xFE0E, 0xFE0F),
+    (0x1F1E6, 0x1F1FF),
+    (0x1F3FB, 0x1F3FF),
+    (0xE0020, 0xE007F),
+)
+
+MAX_ICON_POINTS = 16
+
+
+def in_ranges(ranges, point):
+    return any(low <= point <= high for low, high in ranges)
+
+
+def is_unicode_emoji(text):
+    """One emoji, including joined, keycap, flag and skin tone sequences.
+
+    The old check capped length at 8 and only asked whether any character
+    sat above 0x2000, which threw out family and flag sequences while
+    letting plain CJK through.
+    """
+    points = [ord(ch) for ch in text]
+    if not points or len(points) > MAX_ICON_POINTS:
+        return False
+
+    head = points[0]
+    starts_ok = (
+        in_ranges(EMOJI_BASE, head)
+        or in_ranges(EMOJI_PARTS, head)
+        or (chr(head) in KEYCAP_HEADS and 0x20E3 in points)
+    )
+    if not starts_ok:
+        return False
+
+    return all(
+        in_ranges(EMOJI_BASE, p)
+        or in_ranges(EMOJI_PARTS, p)
+        or chr(p) in KEYCAP_HEADS
+        for p in points
+    )
+
+
+def first_cluster(text):
+    """Keep the first emoji only. A button takes one, not a handful."""
+    if not text:
+        return text
+
+    chars = list(text)
+    head = ord(chars[0])
+
+    # a flag is exactly two regional indicators, never more
+    if in_ranges(((0x1F1E6, 0x1F1FF),), head):
+        return "".join(chars[:2])
+
+    out = [chars[0]]
+    for ch in chars[1:]:
+        attaches = in_ranges(EMOJI_PARTS, ord(ch)) or ord(out[-1]) == 0x200D
+        if not attaches:
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def find_emoji(name, guild, client):
+    """This server first, then anywhere else the bot can reach."""
+    found = emojiutils.find_named(guild, name)
+    if found is not None:
+        return found
+
+    if client is None:
+        return None
+
+    base = re.sub(r"~\d+$", "", name).lower()
+    for emoji in client.emojis:
+        if emoji.name.lower() == base and emoji.is_usable():
+            return emoji
+    return None
+
+
+def resolve_icon(raw, guild, client):
+    """Turn whatever was typed into a storable icon.
+
+    Returns (stored, error). Blank means no icon.
+    """
+    text = (raw or "").strip().replace("\\", "")
+
+    if not text:
+        return None, None
+
+    match = CUSTOM_TOKEN.search(text)
+    if match:
+        emoji_id = int(match.group(3))
+        known = (guild.get_emoji(emoji_id) if guild else None) or (
+            client.get_emoji(emoji_id) if client else None
+        )
+        if known is not None:
+            return str(known), None
+
+        by_name = find_emoji(match.group(2), guild, client)
+        if by_name is not None:
+            return str(by_name), None
+
+        return None, (
+            "i cannot use that emoji. it has to be from this server, or "
+            "another server i am in."
+        )
+
+    named = NAME_TOKEN.match(text)
+    if named:
+        by_name = find_emoji(named.group(1), guild, client)
+        if by_name is not None:
+            return str(by_name), None
+        return None, (
+            f"no emoji named `{named.group(1)}` that i can reach. check the "
+            "name under server settings, or paste a normal emoji instead."
+        )
+
+    squeezed = first_cluster("".join(ch for ch in text if not ch.isspace()))
+    if is_unicode_emoji(squeezed):
+        return squeezed, None
+
+    return None, (
+        "that is not an emoji. paste one, or type a server emoji's name "
+        "like `:sparkles:`. leave the field blank for no icon."
+    )
+
+
+def icon_partial(raw):
+    """Never let a stale or hand edited icon stop a view from rendering."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    if CUSTOM_TOKEN.fullmatch(text):
+        try:
+            return discord.PartialEmoji.from_str(text)
+        except (ValueError, TypeError):
+            return None
+
+    if is_unicode_emoji(text):
+        return discord.PartialEmoji(name=text)
+
+    # an unresolved :name: would be accepted here and then rejected by
+    # discord when the message is sent, taking the whole panel with it.
+    return None
 
 
 def icon_text(button_data):
@@ -600,7 +784,7 @@ class TicketOpenButton(discord.ui.Button):
     def __init__(self, guild_id, button_data):
         super().__init__(
             label=button_data["label"][:80],
-            emoji=emojiutils.to_partial(button_data.get('emoji')),
+            emoji=icon_partial(button_data.get("emoji")),
             style=STYLES[canonical_style(button_data.get("style"))],
             custom_id=f"ticket:open:{guild_id}:{button_data['key']}",
         )
@@ -801,9 +985,9 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
         self.f_emoji = discord.ui.TextInput(
             label="Icon",
             default=base.get("emoji") or "",
-            placeholder="An emoji, or blank for none",
+            placeholder="😀 or :servername: - blank for none",
             required=False,
-            max_length=64,
+            max_length=100,
         )
         self.f_welcome = discord.ui.TextInput(
             label="Opening message",
@@ -840,8 +1024,8 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
                 return
             category_id = candidate.id
 
-        emoji_value, emoji_problem = emojiutils.parse(
-            self.f_emoji.value, interaction.guild
+        emoji_value, emoji_problem = resolve_icon(
+            self.f_emoji.value, interaction.guild, interaction.client
         )
         if emoji_problem:
             await interaction.response.send_message(
@@ -1118,7 +1302,7 @@ class ButtonPickSelect(discord.ui.Select):
             discord.SelectOption(
                 label=b["label"][:100],
                 value=b["key"],
-                emoji=emojiutils.to_partial(b.get('emoji')),
+                emoji=icon_partial(b.get("emoji")),
                 description=(
                     f"{len(b.get('questions', []))} question(s)"
                     if b.get("questions")
