@@ -283,6 +283,48 @@ def resolve_icon(raw, guild, client):
     )
 
 
+def resolve_text(text, guild, client):
+    """Turn :name: inside free text into a usable custom emoji.
+
+    Embed bodies are plain strings, so a shortcode typed into a modal
+    stays a shortcode unless it is swapped out here. Already-resolved
+    <:name:id> forms are parked first so the second pass cannot mangle
+    them. Unknown names are left alone rather than deleted.
+    """
+    if not text:
+        return text
+
+    kept = []
+
+    def stash(match):
+        kept.append(match.group(0))
+        return f"\x00{len(kept) - 1}\x00"
+
+    text = emojiutils.RESOLVED.sub(stash, text)
+
+    def swap(match):
+        found = find_emoji(match.group(1), guild, client)
+        return str(found) if found else match.group(0)
+
+    text = emojiutils.SHORTCODE.sub(swap, text)
+
+    return re.sub(r"\x00(\d+)\x00", lambda m: kept[int(m.group(1))], text)
+
+
+def missing_names(text, guild, client):
+    """Shortcodes in the text that nothing reachable matches."""
+    if not text:
+        return []
+
+    stripped = emojiutils.RESOLVED.sub("", text)
+    dead = [
+        name
+        for name in emojiutils.SHORTCODE.findall(stripped)
+        if find_emoji(name, guild, client) is None
+    ]
+    return sorted(dict.fromkeys(dead))
+
+
 def icon_partial(raw):
     """Never let a stale or hand edited icon stop a view from rendering."""
     text = (raw or "").strip()
@@ -960,15 +1002,32 @@ class EmbedEditModal(discord.ui.Modal, title="Panel Appearance"):
     async def on_submit(self, interaction):
         await interaction.response.defer()
 
+        guild, client = interaction.guild, interaction.client
+
         panel = self.settings["panel"]
-        panel["title"] = self.f_title.value
-        panel["description"] = self.f_desc.value
+        panel["title"] = resolve_text(self.f_title.value, guild, client)
+        panel["description"] = resolve_text(self.f_desc.value, guild, client)
         panel["color"] = parse_color(self.f_color.value, panel["color"])
         panel["image_url"] = clean_url(self.f_image.value)
         panel["thumbnail_url"] = clean_url(self.f_thumb.value)
         save_config()
 
         await self.builder.refresh()
+
+        dead = missing_names(
+            f"{self.f_title.value}\n{self.f_desc.value}", guild, client
+        )
+        if dead:
+            listed = ", ".join(f"`:{d}:`" for d in dead)
+            await interaction.followup.send(
+                embed=embeds.error(
+                    f"saved, but {listed} does not match an emoji i can "
+                    "reach, so it will print as text. check the name under "
+                    "server settings, or paste the emoji itself instead.",
+                    title="Check the format",
+                ),
+                ephemeral=True,
+            )
 
 
 class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
@@ -1035,6 +1094,10 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
 
         await interaction.response.defer()
 
+        welcome = resolve_text(
+            self.f_welcome.value, interaction.guild, interaction.client
+        ) or DEFAULT_BUTTON["welcome"]
+
         if self.existing is None:
             self.settings["buttons"].append(
                 {
@@ -1043,7 +1106,7 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
                     "style": "primary",
                     "emoji": emoji_value,
                     "category_id": category_id,
-                    "welcome": self.f_welcome.value or DEFAULT_BUTTON["welcome"],
+                    "welcome": welcome,
                     "questions": [],
                 }
             )
@@ -1051,7 +1114,7 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
             self.existing["label"] = self.f_label.value
             self.existing["emoji"] = emoji_value
             self.existing["category_id"] = category_id
-            self.existing["welcome"] = self.f_welcome.value or DEFAULT_BUTTON["welcome"]
+            self.existing["welcome"] = welcome
 
         save_config()
         await self.builder.refresh()
