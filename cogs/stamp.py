@@ -9,6 +9,11 @@ from discord.ext import commands
 import embeds
 from storage import Store
 
+try:
+    from PIL import Image
+except ImportError:  # Pillow is in requirements; degrade gracefully if absent.
+    Image = None
+
 log = logging.getLogger(__name__)
 
 PUBLIC_COMMANDS = ("stamps",)
@@ -77,11 +82,36 @@ def suffix_for(attachment):
     return ""
 
 
-def remaining_text(count, maximum):
-    """The single subtext line shown under a card: stamps left to fill it."""
-    remaining = max(0, maximum - count)
-    word = "stamp" if remaining == 1 else "stamps"
-    return "-# " + str(remaining) + " " + word + " remaining"
+def trim_margins(path):
+    """Crop fully transparent padding off a card image so it fills the frame.
+
+    Stamp art is often exported on a larger transparent canvas, which Discord
+    then shows at full width with empty space down the sides. Cropping to the
+    alpha bounding box makes the card itself fill the image.
+
+    Best effort and safe: does nothing without Pillow, on formats with no alpha
+    channel (jpg), on animated images, or when the art is already tight. Every
+    stage shares the same card outline, so each trims to the same box and the
+    stages stay aligned.
+    """
+    if Image is None:
+        return
+    if not path.lower().endswith((".png", ".webp")):
+        return
+    try:
+        with Image.open(path) as img:
+            if getattr(img, "is_animated", False):
+                return
+            if img.mode not in ("RGBA", "LA") and not (
+                img.mode == "P" and "transparency" in img.info
+            ):
+                return
+            rgba = img.convert("RGBA")
+            bbox = rgba.getchannel("A").getbbox()
+            if bbox and bbox != (0, 0, rgba.width, rgba.height):
+                rgba.crop(bbox).save(path)
+    except (OSError, ValueError):
+        return
 
 
 class OverrideModal(discord.ui.Modal, title="Override stamps"):
@@ -505,26 +535,25 @@ class Stamp(commands.Cog):
         return "ok", record, "\n".join(notes), bool(finished or reached), display
 
     def build_card(self, guild_id, member, count, completed, staff):
-        """The card is just the stamp image plus a single subtext line.
+        """The card is just the stamp image, plus staff buttons.
 
-        Returns (file, content, view). note/complete no longer change the
-        display, so callers may still pass them but they are ignored here.
+        Returns (file, view). The remaining count lives on `stamp profile`
+        now, so the card message itself carries no text. note/complete are
+        accepted by callers for compatibility but ignored here.
         """
         config = self.config_for(guild_id)
-        maximum = self.maximum_for(guild_id, config)
         path = self.stage_file(guild_id, config, count)
         if path is None:
-            return None, None, None
+            return None, None
 
         filename = "stamp-card" + os.path.splitext(path)[1]
         file = discord.File(path, filename=filename)
-        content = remaining_text(count, maximum)
         view = StaffView(self, member) if staff else None
-        return file, content, view
+        return file, view
 
     async def send_card(self, ctx, member, config, count, completed, note="", complete=False):
         staff = ctx.author.guild_permissions.manage_messages
-        file, content, view = self.build_card(ctx.guild.id, member, count, completed, staff)
+        file, view = self.build_card(ctx.guild.id, member, count, completed, staff)
         if file is None:
             await embeds.send(
                 ctx,
@@ -535,7 +564,6 @@ class Stamp(commands.Cog):
             )
             return
         await ctx.send(
-            content,
             file=file,
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -545,7 +573,7 @@ class Stamp(commands.Cog):
         self, interaction, member, count, completed, note="", complete=False, message=None
     ):
         guild_id = interaction.guild.id if interaction is not None else message.guild.id
-        file, content, view = self.build_card(guild_id, member, count, completed, True)
+        file, view = self.build_card(guild_id, member, count, completed, True)
         if file is None:
             if interaction is not None:
                 await interaction.response.send_message(
@@ -556,10 +584,10 @@ class Stamp(commands.Cog):
 
         if interaction is not None:
             await interaction.response.edit_message(
-                content=content, attachments=[file], view=view
+                content=None, attachments=[file], view=view
             )
         else:
-            await message.edit(content=content, attachments=[file], view=view)
+            await message.edit(content=None, attachments=[file], view=view)
 
     def collect_images(self, ctx):
         attachments = list(ctx.message.attachments)
@@ -589,7 +617,9 @@ class Stamp(commands.Cog):
                     pass
 
         filename = "stage_" + str(index) + suffix
-        await attachment.save(os.path.join(folder, filename))
+        dest = os.path.join(folder, filename)
+        await attachment.save(dest)
+        trim_margins(dest)
         return filename
 
     @commands.hybrid_command(
