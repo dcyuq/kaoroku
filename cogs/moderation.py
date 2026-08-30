@@ -69,6 +69,20 @@ SAMPLE = {
     "when": "just now",
 }
 
+DEFAULT_NOTICE = (
+    "🚨 {user}, the word **{word}** isn't allowed. "
+    "kindly censor or adjust the spelling for server safety."
+)
+
+NOTICE_FIELDS = ("user", "word")
+
+NOTICE_ALIASES = {
+    "user": "user", "member": "user", "them": "user", "mention": "user",
+    "word": "word", "term": "word", "phrase": "word", "text": "word",
+}
+
+NOTICE_LIMIT = 500
+
 
 def save_config():
     _config_store.save(config)
@@ -89,6 +103,7 @@ def defaults():
         "ping": False,
         "blacklist": [],
         "exempt_roles": [],
+        "notice": DEFAULT_NOTICE,
     }
 
 
@@ -166,6 +181,13 @@ def find_blacklisted(content, words):
         if needle and needle in haystack:
             return entry
     return None
+
+
+def render_notice(template, user_mention, word, guild):
+    """Fill {user}/{word} in the filter notice and resolve any :emoji: names."""
+    return templating.render(
+        template, {"user": user_mention, "word": word}, NOTICE_ALIASES, guild
+    )
 
 
 class TemplateModal(discord.ui.Modal, title="Warn Format"):
@@ -433,10 +455,14 @@ class Moderation(commands.Cog):
             # No Manage Messages, or it is already gone. Nothing to flag.
             return
 
+        template = settings.get("notice") or DEFAULT_NOTICE
+        notice = render_notice(template, author.mention, matched, message.guild)
+        if not notice.strip():
+            return
+
         try:
             await message.channel.send(
-                f"🚨 {author.mention}, the word **{matched}** isn't allowed. "
-                "kindly censor or adjust the spelling for server safety.",
+                notice[:2000],
                 delete_after=NOTICE_DELETE_AFTER,
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False, users=[author]
@@ -793,6 +819,68 @@ class Moderation(commands.Cog):
                     f"{role.mention} now bypasses the word filter.", title="Updated"
                 ),
             )
+
+    @blacklist.command(
+        name="notice",
+        aliases=["message", "msg"],
+        description="Set or view the message shown when a word is blocked.",
+    )
+    @app_commands.describe(
+        text="New message. Use {user} and {word}. Empty to view, 'reset' for default."
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_guild=True)
+    async def blacklist_notice(self, ctx, *, text: str = None):
+        settings = ensure_config(ctx.guild.id)
+
+        if text is None or not text.strip():
+            current = settings.get("notice", DEFAULT_NOTICE)
+            preview = render_notice(current, ctx.author.mention, "example", ctx.guild)
+            embed = embeds.build(
+                "this is posted (then auto-deleted) when someone uses a "
+                "blacklisted word:\n\n"
+                f">>> {current}",
+                title="Filter notice",
+            )
+            embed.add_field(name="Preview", value=preview[:1024], inline=False)
+            embed.add_field(
+                name="Fields",
+                value="`{user}` pings them · `{word}` is the blocked word\n"
+                f"change it with `{display_prefix(ctx)}blacklist notice <text>`, "
+                f"reset with `{display_prefix(ctx)}blacklist notice reset`.",
+                inline=False,
+            )
+            await embeds.send(ctx, embed)
+            return
+
+        wanted = text.strip()
+        if wanted.lower() in ("reset", "default"):
+            settings["notice"] = DEFAULT_NOTICE
+            save_config()
+            await embeds.send(
+                ctx,
+                embeds.notice(
+                    "the filter notice is back to the default.", title="Reset"
+                ),
+            )
+            return
+
+        if len(wanted) > NOTICE_LIMIT:
+            await embeds.send(
+                ctx,
+                embeds.error(f"keep the notice under {NOTICE_LIMIT} characters."),
+            )
+            return
+
+        settings["notice"] = wanted
+        save_config()
+        preview = render_notice(wanted, ctx.author.mention, "example", ctx.guild)
+        await embeds.send(
+            ctx,
+            embeds.notice(
+                "saved. it now reads:\n\n" + preview[:1500], title="Filter notice"
+            ),
+        )
 
 
 async def setup(bot):
