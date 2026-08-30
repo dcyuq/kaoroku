@@ -81,7 +81,7 @@ def remaining_text(count, maximum):
     """The single subtext line shown under a card: stamps left to fill it."""
     remaining = max(0, maximum - count)
     word = "stamp" if remaining == 1 else "stamps"
-    return str(remaining) + " " + word + " remaining"
+    return "-# " + str(remaining) + " " + word + " remaining"
 
 
 class OverrideModal(discord.ui.Modal, title="Override stamps"):
@@ -172,7 +172,7 @@ class ConfirmReset(discord.ui.View):
         )
         return False
 
-    @discord.ui.button(label="reset stamps", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="reset stamps", style=discord.ButtonStyle.secondary)
     async def confirm(self, interaction, button):
         record = self.cog.write_record(interaction.guild.id, self.member.id, 0, None)
         await interaction.response.edit_message(
@@ -212,7 +212,7 @@ class StaffView(discord.ui.View):
         )
         return False
 
-    @discord.ui.button(label="stamp", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="stamp", style=discord.ButtonStyle.secondary)
     async def add_one(self, interaction, button):
         status, record, notes, celebrate, display = self.cog.push_stamp(
             interaction.guild.id, self.member.id, 1
@@ -243,7 +243,7 @@ class StaffView(discord.ui.View):
             OverrideModal(self.cog, self.member, maximum, record)
         )
 
-    @discord.ui.button(label="reset", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="reset", style=discord.ButtonStyle.secondary)
     async def reset(self, interaction, button):
         await interaction.response.send_message(
             embed=embeds.notice(
@@ -274,7 +274,7 @@ class IssueView(discord.ui.View):
         )
         return False
 
-    @discord.ui.button(label="give a card", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="give a card", style=discord.ButtonStyle.secondary)
     async def give(self, interaction, button):
         record = self.cog.issue_card(interaction.guild.id, self.member.id)
         if record is None:
@@ -505,10 +505,9 @@ class Stamp(commands.Cog):
         return "ok", record, "\n".join(notes), bool(finished or reached), display
 
     def build_card(self, guild_id, member, count, completed, staff):
-        """The card is the stamp image in an accent embed plus a single
-        subtext line.
+        """The card is just the stamp image plus a single subtext line.
 
-        Returns (file, embed, view). note/complete no longer change the
+        Returns (file, content, view). note/complete no longer change the
         display, so callers may still pass them but they are ignored here.
         """
         config = self.config_for(guild_id)
@@ -519,15 +518,13 @@ class Stamp(commands.Cog):
 
         filename = "stamp-card" + os.path.splitext(path)[1]
         file = discord.File(path, filename=filename)
-        embed = embeds.build()
-        embed.set_image(url="attachment://" + filename)
-        embed.set_footer(text=remaining_text(count, maximum))
+        content = remaining_text(count, maximum)
         view = StaffView(self, member) if staff else None
-        return file, embed, view
+        return file, content, view
 
     async def send_card(self, ctx, member, config, count, completed, note="", complete=False):
         staff = ctx.author.guild_permissions.manage_messages
-        file, embed, view = self.build_card(ctx.guild.id, member, count, completed, staff)
+        file, content, view = self.build_card(ctx.guild.id, member, count, completed, staff)
         if file is None:
             await embeds.send(
                 ctx,
@@ -538,7 +535,7 @@ class Stamp(commands.Cog):
             )
             return
         await ctx.send(
-            embed=embed,
+            content,
             file=file,
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -548,7 +545,7 @@ class Stamp(commands.Cog):
         self, interaction, member, count, completed, note="", complete=False, message=None
     ):
         guild_id = interaction.guild.id if interaction is not None else message.guild.id
-        file, embed, view = self.build_card(guild_id, member, count, completed, True)
+        file, content, view = self.build_card(guild_id, member, count, completed, True)
         if file is None:
             if interaction is not None:
                 await interaction.response.send_message(
@@ -559,10 +556,10 @@ class Stamp(commands.Cog):
 
         if interaction is not None:
             await interaction.response.edit_message(
-                embed=embed, attachments=[file], view=view
+                content=content, attachments=[file], view=view
             )
         else:
-            await message.edit(embed=embed, attachments=[file], view=view)
+            await message.edit(content=content, attachments=[file], view=view)
 
     def collect_images(self, ctx):
         attachments = list(ctx.message.attachments)
@@ -1161,12 +1158,10 @@ class Stamp(commands.Cog):
             await embeds.send(ctx, embeds.error("no image is set for that stage."))
             return
         filename = "stamp-preview" + os.path.splitext(path)[1]
-        file = discord.File(path, filename=filename)
-        embed = embeds.build()
-        embed.set_image(url="attachment://" + filename)
-        embed.set_footer(text="stage " + str(count) + " of " + str(maximum))
         await ctx.send(
-            embed=embed, file=file, allowed_mentions=discord.AllowedMentions.none()
+            "-# stage " + str(count) + " of " + str(maximum),
+            file=discord.File(path, filename=filename),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
