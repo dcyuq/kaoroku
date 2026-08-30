@@ -17,6 +17,8 @@ class Sync(commands.Cog):
         self.bot = bot
 
     async def cog_check(self, ctx):
+        if ctx.guild and ctx.author.guild_permissions.administrator:
+            return True
         if await self.bot.is_owner(ctx.author):
             return True
         raise commands.NotOwner()
