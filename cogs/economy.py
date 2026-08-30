@@ -106,6 +106,7 @@ def defaults():
         "add_template": DEFAULT_ADD,
         "deduct_template": DEFAULT_DEDUCT,
         "pay_template": DEFAULT_PAY,
+        "embed": True,
     }
 
 
@@ -158,12 +159,11 @@ def render(template, values, guild):
     return templating.render(template, values, ALIASES, guild)
 
 
-def event_embed(guild, template, values):
+def render_event(guild, template, values):
     base = {"date": "", "time": "", "when": ""}
     base.update(values)
     base.update(stamp_values(guild, int(time.time())))
-    body = render(template, base, guild)
-    return embeds.build(body[:4096])
+    return render(template, base, guild)
 
 
 class CurrencyModal(discord.ui.Modal, title="Currency name"):
@@ -333,6 +333,7 @@ class SetupView(discord.ui.View):
         lines = [
             f"**Logs drop in** - {channel.mention if channel else 'not set'}",
             f"**Currency** - {settings.get('currency', 'cookies')}",
+            f"**Message style** - {'embed' if settings.get('embed', True) else 'plain text'}",
             f"**Extra roles that can add/deduct** - {role_text}",
             "",
             f"**Wallets in use** - {wallet_count(guild.id)}",
@@ -406,6 +407,13 @@ class SetupView(discord.ui.View):
             ),
             ephemeral=True,
         )
+
+    @discord.ui.button(label="embed on/off", style=discord.ButtonStyle.secondary, row=2)
+    async def toggle_embed(self, interaction, button):
+        await interaction.response.defer()
+        self.settings["embed"] = not self.settings.get("embed", True)
+        save_config()
+        await self.refresh()
 
     @discord.ui.button(label="reset formats", style=discord.ButtonStyle.danger, row=2)
     async def reset(self, interaction, button):
@@ -539,7 +547,7 @@ class Economy(commands.Cog):
         currency = settings.get("currency", "cookies")
         new_balance = set_balance(ctx.guild.id, user.id, balance_of(ctx.guild.id, user.id) + amount)
 
-        embed = event_embed(
+        body = render_event(
             ctx.guild,
             settings["add_template"],
             {
@@ -550,11 +558,16 @@ class Economy(commands.Cog):
                 "moderator": ctx.author.mention,
             },
         )
-        embed.set_image(url=picture.reference)
 
         try:
-            sent = await channel.send(embed=embed, file=picture.file(),
-                                      allowed_mentions=discord.AllowedMentions.none())
+            if settings.get("embed", True):
+                embed = embeds.build(body[:4096])
+                embed.set_image(url=picture.reference)
+                sent = await channel.send(embed=embed, file=picture.file(),
+                                          allowed_mentions=discord.AllowedMentions.none())
+            else:
+                sent = await channel.send(content=body[:2000], file=picture.file(),
+                                          allowed_mentions=discord.AllowedMentions.none())
         except discord.Forbidden:
             await embeds.send(ctx, embeds.error("i cannot post in the log channel."))
             return
@@ -605,7 +618,7 @@ class Economy(commands.Cog):
         removed = min(amount, current)
         new_balance = set_balance(ctx.guild.id, user.id, current - removed)
 
-        embed = event_embed(
+        body = render_event(
             ctx.guild,
             settings["deduct_template"],
             {
@@ -617,7 +630,10 @@ class Economy(commands.Cog):
             },
         )
         try:
-            sent = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            if settings.get("embed", True):
+                sent = await channel.send(embed=embeds.build(body[:4096]), allowed_mentions=discord.AllowedMentions.none())
+            else:
+                sent = await channel.send(content=body[:2000], allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
             sent = None
 
@@ -685,7 +701,7 @@ class Economy(commands.Cog):
 
         channel = ctx.guild.get_channel(settings.get("channel_id"))
         if channel is not None:
-            embed = event_embed(
+            body = render_event(
                 ctx.guild,
                 settings["pay_template"],
                 {
@@ -698,7 +714,10 @@ class Economy(commands.Cog):
                 },
             )
             try:
-                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                if settings.get("embed", True):
+                    await channel.send(embed=embeds.build(body[:4096]), allowed_mentions=discord.AllowedMentions.none())
+                else:
+                    await channel.send(content=body[:2000], allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 pass
 
