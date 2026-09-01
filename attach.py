@@ -1,3 +1,4 @@
+import asyncio
 import io
 import re
 
@@ -83,15 +84,17 @@ async def read_file(attachment):
 async def read_files(attachments, limit=MAX_FILES):
     """Read several attachments of any type. Returns (pictures, error).
 
+    Downloads run concurrently, so ten photos take about as long as one.
     An empty list in, an empty list out - no attachments is not an error.
     """
     picked = [a for a in attachments if a is not None]
     if len(picked) > limit:
         return [], f"that is too many files. i can take up to {limit} at once."
 
+    results = await asyncio.gather(*(read_file(a) for a in picked))
+
     pictures = []
-    for attachment in picked:
-        picture, problem = await read_file(attachment)
+    for picture, problem in results:
         if problem:
             return [], problem
         pictures.append(picture)

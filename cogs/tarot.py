@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import time
@@ -720,7 +721,12 @@ class DeliveryPanel(discord.ui.View):
             )
             if log_ref:
                 log_embed.set_image(url=log_ref)
-            await send_log(interaction.guild, log_embed, files=log_files)
+            # Fire the log copy in the background so the reader's "delivered"
+            # confirmation doesn't wait on a third upload of the same files.
+            # Kept on the view so the task isn't garbage collected mid-flight.
+            self._log_task = asyncio.create_task(
+                send_log(interaction.guild, log_embed, files=log_files)
+            )
 
         for item in self.children:
             item.disabled = True
