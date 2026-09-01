@@ -597,9 +597,25 @@ class DeliveryPanel(discord.ui.View):
         record.pop("display", None)
 
         embed = reading_embed(interaction.guild, self.settings, record)
-        _, image_ref = attach.attachment_payload(self.pictures, self.first_image)
-        if image_ref:
-            embed.set_image(url=image_ref)
+        if self.first_image is not None:
+            embed.set_image(url=self.first_image.reference)
+
+        # Only the first image can live inside the embed. Anything else (a
+        # pdf, extra photos) would otherwise stack ABOVE the embed, so it goes
+        # in a follow-up message that lands right under the reading instead.
+        extras = [p for p in self.pictures if p is not self.first_image]
+
+        def reading_files():
+            if self.first_image is None:
+                return []
+            files, _ = attach.attachment_payload(
+                [self.first_image], self.first_image
+            )
+            return files
+
+        def extra_files():
+            files, _ = attach.attachment_payload(extras)
+            return files
 
         ping = self.settings.get("ping", True)
         sent_dm = False
@@ -607,23 +623,28 @@ class DeliveryPanel(discord.ui.View):
         dm_error = None
 
         if self.mode in ("dm", "both") and user is not None:
-            files, _ = attach.attachment_payload(self.pictures, self.first_image)
             try:
-                await user.send(embed=embed, files=files or None)
+                await user.send(embed=embed, files=reading_files() or None)
                 sent_dm = True
             except discord.Forbidden:
                 dm_error = "their dms are closed"
             except discord.HTTPException:
                 log.exception("tarot dm failed for %s", record["user_id"])
                 dm_error = "discord turned the dm down"
+            if sent_dm and extras:
+                try:
+                    await user.send(files=extra_files())
+                except discord.HTTPException:
+                    log.exception(
+                        "tarot dm extras failed for %s", record["user_id"]
+                    )
 
         if channel is not None:
-            files, _ = attach.attachment_payload(self.pictures, self.first_image)
             try:
                 posted = await channel.send(
                     content=user.mention if (ping and user) else None,
                     embed=embed,
-                    files=files or None,
+                    files=reading_files() or None,
                     allowed_mentions=discord.AllowedMentions(
                         everyone=False, roles=False, users=ping
                     ),
@@ -643,6 +664,14 @@ class DeliveryPanel(discord.ui.View):
                     ephemeral=True,
                 )
                 return
+            if extras:
+                try:
+                    await channel.send(
+                        files=extra_files(),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except discord.HTTPException:
+                    log.exception("tarot post extras rejected in %s", channel.id)
 
         if not sent_dm and posted is None:
             await interaction.followup.send(
