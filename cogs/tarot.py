@@ -87,6 +87,7 @@ def get_config(guild_id):
 def defaults():
     return {
         "vouch_channel_id": None,
+        "log_channel_id": None,
         "template": DEFAULT_TEMPLATE,
         "ping": True,
     }
@@ -161,6 +162,50 @@ def render(template, values, guild):
 def reading_embed(guild, settings, record):
     body = render(settings["template"], reading_values(guild, settings, record), guild)
     return embeds.build(body[:4096])
+
+
+def reading_log_embed(guild, record, destination_text, jump_url, file_count):
+    """A staff-facing record of exactly what a reader sent out."""
+    lines = [
+        f"**reader** - <@{record['reader_id']}>",
+        f"**for** - <@{record['user_id']}>",
+        f"**sent to** - {destination_text}",
+        f"**reading #** - {record.get('count', 1)}",
+    ]
+    if file_count:
+        lines.append(f"**files** - {file_count}")
+    if jump_url:
+        lines.append(f"**message** - [jump]({jump_url})")
+
+    embed = embeds.build("\n".join(lines), title="Reading sent")
+    embed.add_field(
+        name="What was sent",
+        value=(record.get("tarot") or "-")[:1024],
+        inline=False,
+    )
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+async def send_log(guild, embed, files=None):
+    """Drop a record in the reading log channel, if one is set."""
+    settings = get_config(guild.id)
+    if not settings:
+        return
+    channel = guild.get_channel(settings.get("log_channel_id"))
+    if channel is None:
+        return
+    if not channel.permissions_for(guild.me).send_messages:
+        return
+
+    kwargs = {"embed": embed, "allowed_mentions": discord.AllowedMentions.none()}
+    if files:
+        kwargs["files"] = files
+
+    try:
+        await channel.send(**kwargs)
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception("tarot log post failed in %s", channel.id)
 
 
 class TemplateModal(discord.ui.Modal, title="Reading Format"):
@@ -295,13 +340,18 @@ class SetupView(discord.ui.View):
         settings = self.settings
 
         vouch = guild.get_channel(settings.get("vouch_channel_id"))
+        log_channel = guild.get_channel(settings.get("log_channel_id"))
 
         lines = [
             f"**Vouch channel** - {vouch.mention if vouch else 'not set'}",
+            f"**Reading log** - {log_channel.mention if log_channel else 'not set'}",
             f"**Pings the person** - {'yes' if settings['ping'] else 'no'}",
             "",
             "readings go to whichever channel the reader picks when they run "
             "the command, or straight to dms if they pick none.",
+            "",
+            "when a reading log is set, every reading is copied there so staff "
+            "can see exactly what was sent.",
             "",
             f"**Readings given** - "
             f"{len([r for r in readings if r['guild_id'] == guild.id])}",
@@ -321,7 +371,7 @@ class SetupView(discord.ui.View):
             inline=False,
         )
         embed.set_footer(
-            text="vouch channel · format · ping — all editable below"
+            text="vouch channel · reading log · format · ping — all editable below"
         )
         return embed
 
@@ -343,6 +393,17 @@ class SetupView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="log channel", style=discord.ButtonStyle.secondary, row=0)
+    async def log_channel(self, interaction, button):
+        await interaction.response.send_message(
+            embed=embeds.notice(
+                "pick the channel where a copy of every reading is logged. "
+                "leave it unset to keep no log."
+            ),
+            view=ChannelView(self, "log_channel_id"),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="format", style=discord.ButtonStyle.secondary, row=0)
     async def format_button(self, interaction, button):
         await interaction.response.send_modal(TemplateModal(self))
@@ -355,8 +416,9 @@ class SetupView(discord.ui.View):
                 "in:\n\n"
                 + "\n".join(f"`{{{f}}}`" for f in FIELDS)
                 + "\n\n`{vouch channel}` becomes a clickable channel once you "
-                "set one above. type `:name:` for a server emoji. an "
-                "attached image is added under the text automatically.",
+                "set one above. type `:name:` for a server emoji. attached "
+                "files are added under the text automatically, the first "
+                "image inside the embed and the rest below it.",
                 title="Format fields",
             ),
             ephemeral=True,
@@ -424,12 +486,17 @@ class DestinationSelect(discord.ui.ChannelSelect):
 class DeliveryPanel(discord.ui.View):
     """Asks where the reading goes, then sends it."""
 
-    def __init__(self, ctx, settings, record, picture):
+    def __init__(self, ctx, settings, record, pictures):
         super().__init__(timeout=300)
         self.ctx = ctx
         self.settings = settings
         self.record = record
-        self.picture = picture
+        self.pictures = pictures or []
+        # only an image can sit inside the embed; the rest ride along as
+        # ordinary attachments under it.
+        self.first_image = next(
+            (p for p in self.pictures if p.is_image), None
+        )
         self.mode = "dm"
         self.channel_id = None
         self.message = None
@@ -474,8 +541,8 @@ class DeliveryPanel(discord.ui.View):
         record = dict(self.record)
         record["channel_id"] = self.channel_id
         embed = reading_embed(self.ctx.guild, self.settings, record)
-        if self.picture is not None:
-            embed.set_image(url=self.picture.reference)
+        if self.first_image is not None:
+            embed.set_image(url=self.first_image.reference)
 
         if self.needs_channel and self.channel is None:
             note = "pick a channel below before sending."
@@ -488,6 +555,9 @@ class DeliveryPanel(discord.ui.View):
                 f"going to {self.channel.mention} and "
                 f"{self.record['display']}'s dms."
             )
+        count = len(self.pictures)
+        if count:
+            note += f" {count} file{'' if count == 1 else 's'} attached."
         embed.set_footer(text=note)
         return embed
 
@@ -527,8 +597,9 @@ class DeliveryPanel(discord.ui.View):
         record.pop("display", None)
 
         embed = reading_embed(interaction.guild, self.settings, record)
-        if self.picture is not None:
-            embed.set_image(url=self.picture.reference)
+        _, image_ref = attach.attachment_payload(self.pictures, self.first_image)
+        if image_ref:
+            embed.set_image(url=image_ref)
 
         ping = self.settings.get("ping", True)
         sent_dm = False
@@ -536,11 +607,9 @@ class DeliveryPanel(discord.ui.View):
         dm_error = None
 
         if self.mode in ("dm", "both") and user is not None:
+            files, _ = attach.attachment_payload(self.pictures, self.first_image)
             try:
-                await user.send(
-                    embed=embed,
-                    file=self.picture.file() if self.picture else None,
-                )
+                await user.send(embed=embed, files=files or None)
                 sent_dm = True
             except discord.Forbidden:
                 dm_error = "their dms are closed"
@@ -549,11 +618,12 @@ class DeliveryPanel(discord.ui.View):
                 dm_error = "discord turned the dm down"
 
         if channel is not None:
+            files, _ = attach.attachment_payload(self.pictures, self.first_image)
             try:
                 posted = await channel.send(
                     content=user.mention if (ping and user) else None,
                     embed=embed,
-                    file=self.picture.file() if self.picture else None,
+                    files=files or None,
                     allowed_mentions=discord.AllowedMentions(
                         everyone=False, roles=False, users=ping
                     ),
@@ -602,6 +672,26 @@ class DeliveryPanel(discord.ui.View):
         body += f" that is reading #{record['count']} for {name}."
         if posted is not None:
             body += f" {posted.jump_url}"
+
+        if self.settings.get("log_channel_id"):
+            dest_bits = []
+            if sent_dm:
+                dest_bits.append(f"{name}'s dms")
+            if posted is not None:
+                dest_bits.append(channel.mention)
+            log_files, log_ref = attach.attachment_payload(
+                self.pictures, self.first_image
+            )
+            log_embed = reading_log_embed(
+                interaction.guild,
+                record,
+                " and ".join(dest_bits) or "nowhere",
+                posted.jump_url if posted else None,
+                len(self.pictures),
+            )
+            if log_ref:
+                log_embed.set_image(url=log_ref)
+            await send_log(interaction.guild, log_embed, files=log_files)
 
         for item in self.children:
             item.disabled = True
@@ -670,7 +760,11 @@ class Tarot(commands.Cog):
     @app_commands.describe(
         user="Who the reading is for",
         tarot="The reading itself",
-        image="An optional card photo or spread",
+        image="An optional card photo, spread or file",
+        image2="Another file (optional)",
+        image3="Another file (optional)",
+        image4="Another file (optional)",
+        image5="Another file (optional)",
     )
     @commands.guild_only()
     @commands.cooldown(1, COOLDOWN_SECONDS, commands.BucketType.user)
@@ -679,10 +773,14 @@ class Tarot(commands.Cog):
         ctx,
         user: discord.Member,
         image: discord.Attachment = None,
+        image2: discord.Attachment = None,
+        image3: discord.Attachment = None,
+        image4: discord.Attachment = None,
+        image5: discord.Attachment = None,
         *,
         tarot: str,
     ):
-        # Reading an upload and sending two messages takes longer than the
+        # Reading uploads and sending two messages takes longer than the
         # three seconds Discord allows before the interaction dies.
         await ctx.defer(ephemeral=True)
 
@@ -705,7 +803,28 @@ class Tarot(commands.Cog):
             )
             return
 
-        picture, problem = await attach.read_image(image)
+        # The five slots cover slash uploads; a prefix message can carry up
+        # to ten files, so pull any extras straight off the message too.
+        chosen = [image, image2, image3, image4, image5]
+        chosen += list(getattr(ctx.message, "attachments", None) or [])
+        seen, attachments = set(), []
+        for item in chosen:
+            if item is None or item.id in seen:
+                continue
+            seen.add(item.id)
+            attachments.append(item)
+
+        if len(attachments) > attach.MAX_FILES:
+            await embeds.send(
+                ctx,
+                embeds.error(
+                    f"that is a lot of files. i can take up to "
+                    f"{attach.MAX_FILES} at once."
+                ),
+            )
+            return
+
+        pictures, problem = await attach.read_files(attachments)
         if problem:
             await embeds.send(ctx, embeds.error(problem))
             return
@@ -721,7 +840,7 @@ class Tarot(commands.Cog):
             "display": user.display_name,
         }
 
-        panel = DeliveryPanel(ctx, settings, record, picture)
+        panel = DeliveryPanel(ctx, settings, record, pictures)
         panel.message = await ctx.send(
             embed=panel.preview(),
             view=panel,
@@ -731,7 +850,7 @@ class Tarot(commands.Cog):
 
     @tarot.command(
         name="setup",
-        description="Customise the reading format and vouch channel.",
+        description="Customise the reading format, vouch channel and reading log.",
     )
     @app_commands.default_permissions(manage_guild=True)
     @commands.has_permissions(manage_guild=True)

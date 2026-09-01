@@ -1,3 +1,4 @@
+import io
 import logging
 import re
 import time
@@ -8,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import embeds
+import transcript
 from prefixes import display_prefix
 import emojiutils
 from storage import Store, IntKeyStore
@@ -687,6 +689,10 @@ def build_close_embed(guild, entry):
         value=duration_text(entry["closed_at"] - entry["opened_at"]),
         inline=True,
     )
+    if entry.get("total_msgs") is not None:
+        embed.add_field(
+            name="Messages", value=str(entry["total_msgs"]), inline=True
+        )
     embed.add_field(
         name="Reason", value=entry.get("reason") or "No reason given", inline=False
     )
@@ -695,6 +701,55 @@ def build_close_embed(guild, entry):
         embed.add_field(name=question[:256], value=(answer or "-")[:1024], inline=False)
 
     return embed
+
+
+def link_view(url, label="view transcript"):
+    """A view holding a single external-link button. Needs no persistence."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(
+        discord.ui.Button(style=discord.ButtonStyle.link, url=url, label=label)
+    )
+    return view
+
+
+def close_dm_embed(guild, entry, closer):
+    """The note the opener gets in dms when their ticket is closed."""
+    closed_at = int(entry.get("closed_at") or time.time())
+    closer_text = closer.mention if closer else f"<@{entry.get('closer_id')}>"
+    lines = [
+        "thank you for stopping by. do come again soon.",
+        "",
+        f"**closed by** : {closer_text}",
+        f"**total msg** : {entry.get('total_msgs', 0)}",
+        f"**closed on** : <t:{closed_at}:R>",
+    ]
+    embed = embeds.build("\n".join(lines), title="your ticket has been closed")
+    embed.set_footer(text=guild.name)
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    return embed
+
+
+async def build_transcript_file(channel, entry):
+    """Read the ticket's history and render it. Returns (bytes, count).
+
+    Records the message count on the entry before rendering. On any failure
+    the bytes come back None so closing never hangs on a transcript.
+    """
+    messages = []
+    try:
+        async for message in channel.history(limit=None, oldest_first=True):
+            messages.append(message)
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception("could not read history for ticket %s", channel.id)
+
+    entry["total_msgs"] = len(messages)
+    try:
+        html_text = transcript.build_html(channel.guild, channel, entry, messages)
+    except Exception:
+        log.exception("transcript render failed for ticket %s", channel.id)
+        return None, len(messages)
+    return html_text.encode("utf-8"), len(messages)
 
 
 class EditReasonModal(discord.ui.Modal, title="Edit Close Reason"):
@@ -716,12 +771,23 @@ class EditReasonModal(discord.ui.Modal, title="Edit Close Reason"):
 
         embed = build_close_embed(interaction.guild, self.entry)
         embed.set_footer(text=f"Reason last edited by {interaction.user.display_name}")
-        await interaction.response.edit_message(embed=embed, view=LogControlView())
+        await interaction.response.edit_message(
+            embed=embed,
+            view=LogControlView(transcript_url=self.entry.get("transcript_url")),
+        )
 
 
 class LogControlView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, transcript_url=None):
         super().__init__(timeout=None)
+        if transcript_url:
+            self.add_item(
+                discord.ui.Button(
+                    style=discord.ButtonStyle.link,
+                    url=transcript_url,
+                    label="view transcript",
+                )
+            )
 
     @discord.ui.button(
         label="Edit Reason",
@@ -761,8 +827,12 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
         self.add_item(self.f_reason)
 
     async def on_submit(self, interaction):
-        await interaction.response.send_message(embed=embeds.notice("closing this ticket."), ephemeral=True)
+        await interaction.response.send_message(
+            embed=embeds.notice("closing this ticket. saving the transcript…"),
+            ephemeral=True,
+        )
 
+        guild = interaction.guild
         entry = {
             "guild_id": self.data["guild_id"],
             "number": self.data["number"],
@@ -776,18 +846,65 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
             "reason": self.f_reason.value,
         }
 
-        settings = get_config(interaction.guild.id)
-        log_channel = interaction.guild.get_channel(settings.get("log_channel_id"))
+        # Read the channel before it is deleted below.
+        html_bytes, _ = await build_transcript_file(self.channel, entry)
+        filename = f"transcript-{entry['number']:04d}.html"
+
+        settings = get_config(guild.id)
+        log_channel = (
+            guild.get_channel(settings.get("log_channel_id")) if settings else None
+        )
+
+        transcript_url = None
 
         if log_channel is not None:
             try:
-                sent = await log_channel.send(
-                    embed=build_close_embed(interaction.guild, entry),
-                    view=LogControlView(),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                kwargs = {
+                    "embed": build_close_embed(guild, entry),
+                    "view": LogControlView(),
+                    "allowed_mentions": discord.AllowedMentions.none(),
+                }
+                if html_bytes is not None:
+                    kwargs["file"] = discord.File(
+                        io.BytesIO(html_bytes), filename=filename
+                    )
+                sent = await log_channel.send(**kwargs)
+
+                if sent.attachments:
+                    transcript_url = sent.attachments[0].url
+                    entry["transcript_url"] = transcript_url
+                    try:
+                        await sent.edit(
+                            view=LogControlView(transcript_url=transcript_url)
+                        )
+                    except discord.HTTPException:
+                        pass
+
                 logs[sent.id] = entry
                 save_logs()
+            except (discord.Forbidden, discord.HTTPException):
+                log.exception("ticket close log failed for %s", self.channel.id)
+
+        # DM the opener their own copy, matching the closed-ticket note.
+        opener = guild.get_member(entry["opener_id"])
+        if opener is not None:
+            try:
+                dm_kwargs = {"embed": close_dm_embed(guild, entry, interaction.user)}
+                if html_bytes is not None:
+                    dm_kwargs["file"] = discord.File(
+                        io.BytesIO(html_bytes), filename=filename
+                    )
+                if transcript_url:
+                    dm_kwargs["view"] = link_view(transcript_url)
+                dm = await opener.send(**dm_kwargs)
+
+                # With no log channel to host the file, point the button at
+                # the dm's own attachment instead.
+                if not transcript_url and dm.attachments:
+                    try:
+                        await dm.edit(view=link_view(dm.attachments[0].url))
+                    except discord.HTTPException:
+                        pass
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
