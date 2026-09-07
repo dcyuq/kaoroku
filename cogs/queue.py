@@ -32,20 +32,19 @@ PAD = "\u3164"
 JOINER = "\u2060"
 
 DEFAULT_TEMPLATE = (
-    f":03dc_cake:{PAD}the counter is ringing!\n"
-    f"{PAD}\n"
-    f":shortcake1:{PAD}{{user}}．． ．{JOINER}{{ticket}}\n"
-    ":strawberri: ( quantity : {quantity} ) - {item}\n"
-    ":MS_coffee1: {price} - {payment}\n"
-    ":strawberri: order status — {status}\n"
-    f":IceCreamSundae:{PAD}ticket handled by : {{handler}}\n"
-    f":dndexl:{PAD}{{date}}"
+    "order for {user}\n"
+    "\n"
+    "ticket: {ticket}\n"
+    "{quantity}x {item}\n"
+    "{price} via {payment}\n"
+    "status: {status}\n"
+    "handler: {handler}\n"
+    "{date}"
 )
 
 DEFAULT_PLACEHOLDER = "update order status"
 DEFAULT_OPTION_TEXT = "change order status"
 DEFAULT_NOTIFY = "order queued in {channel}"
-DEFAULT_STYLE = "embed"
 
 DEFAULT_STATUSES = [
     {"key": "noted", "label": "noted", "emoji": None,
@@ -79,81 +78,86 @@ ALIASES = {
     "queued": "queued", "queued at": "queued", "when": "queued",
 }
 
-NOTIFY_ALIASES = dict(ALIASES)
-NOTIFY_ALIASES.update(
-    {"channel": "channel", "queue": "channel",
-     "link": "link", "post": "link", "jump": "link"}
-)
-
 SAMPLE = {
     "user": "@customer",
-    "ticket": "ticket-0042",
-    "quantity": "2",
-    "item": "strawberry shortcake",
-    "price": "₱350",
-    "payment": "gcash",
+    "ticket": "ticket-0001",
+    "quantity": "1",
+    "item": "the item",
+    "price": "the price",
+    "payment": "the method",
     "status": "noted",
     "handler": "@you",
-    "date": "august 22, 2026",
-    "time": "3:11 am",
+    "date": "the date",
+    "time": "the time",
     "queued": "just now",
 }
-
-DEFAULTS = {
-    "channel_id": None,
-    "template": DEFAULT_TEMPLATE,
-    "notify": DEFAULT_NOTIFY,
-    "ping": True,
-    "style": DEFAULT_STYLE,
-    "placeholder": DEFAULT_PLACEHOLDER,
-}
-
 
 def save_config():
     _config_store.save(config)
 
 
+STALE_MARKERS = (":03dc_cake:", ":shortcake1:", ":strawberri:", ":IceCreamSundae:", ":dndexl:", ":MS_coffee1:")
+
+
+def _migrate_templates():
+    changed = False
+    for _s in config.values():
+        if isinstance(_s, dict) and isinstance(_s.get("template"), str):
+            if any(_m in _s["template"] for _m in STALE_MARKERS):
+                _s["template"] = DEFAULT_TEMPLATE
+                changed = True
+    if changed:
+        save_config()
+
+
+_migrate_templates()
+
 def save_orders():
     _order_store.save(orders)
-
 
 def get_config(guild_id):
     return config.get(str(guild_id))
 
-
 def ensure_config(guild_id):
     key = str(guild_id)
     if key not in config:
-        config[key] = dict(DEFAULTS)
-        config[key]["statuses"] = [dict(s) for s in DEFAULT_STATUSES]
+        config[key] = {
+            "channel_id": None,
+            "template": DEFAULT_TEMPLATE,
+            "notify": DEFAULT_NOTIFY,
+            "ping": True,
+            "placeholder": DEFAULT_PLACEHOLDER,
+            "statuses": [dict(s) for s in DEFAULT_STATUSES],
+        }
 
     settings = config[key]
-    for field, value in DEFAULTS.items():
-        settings.setdefault(field, value)
+    settings.setdefault("template", DEFAULT_TEMPLATE)
+    settings.setdefault("notify", DEFAULT_NOTIFY)
+    settings.setdefault("ping", True)
+    settings.setdefault("placeholder", DEFAULT_PLACEHOLDER)
+    settings.setdefault("channel_id", None)
     if not settings.get("statuses"):
         settings["statuses"] = [dict(s) for s in DEFAULT_STATUSES]
     return settings
 
-
 def settings_for(guild_id):
-    stored = get_config(guild_id)
-    if stored is not None:
-        return stored
-    fallback = dict(DEFAULTS)
-    fallback["statuses"] = [dict(s) for s in DEFAULT_STATUSES]
-    return fallback
-
+    return get_config(guild_id) or {
+        "channel_id": None,
+        "template": DEFAULT_TEMPLATE,
+        "notify": DEFAULT_NOTIFY,
+        "ping": True,
+        "placeholder": DEFAULT_PLACEHOLDER,
+        "statuses": [dict(s) for s in DEFAULT_STATUSES],
+    }
 
 def statuses_of(settings):
     return settings.get("statuses") or DEFAULT_STATUSES
-
 
 def find_status(settings, key):
     for entry in statuses_of(settings):
         if entry["key"] == key:
             return entry
     return None
-
 
 def status_by_name(settings, text):
     text = (text or "").strip().lower()
@@ -164,23 +168,18 @@ def status_by_name(settings, text):
             return entry
     return None
 
-
 def initial_status(settings):
     return statuses_of(settings)[0]["key"]
-
 
 def status_label(settings, key):
     entry = find_status(settings, key)
     return entry["label"] if entry else key
 
-
 def in_menu(entry):
     return entry.get("menu", True)
 
-
 def menu_statuses(settings):
     return [s for s in statuses_of(settings) if in_menu(s)][:MENU_LIMIT]
-
 
 def slug(text, taken):
     base = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
@@ -191,24 +190,25 @@ def slug(text, taken):
         n += 1
     return candidate
 
-
 def render(template, values, guild):
     return templating.render(template, values, ALIASES, guild)
-
-
-def render_notify(template, values, guild):
-    return templating.render(template, values, NOTIFY_ALIASES, guild)
-
 
 def unknown_placeholders(template):
     return templating.unknown(template, ALIASES)
 
+NOTIFY_ALIASES = dict(ALIASES)
+NOTIFY_ALIASES.update(
+    {"channel": "channel", "queue": "channel",
+     "link": "link", "post": "link", "jump": "link"}
+)
+
+def render_notify(template, values, guild):
+    return templating.render(template, values, NOTIFY_ALIASES, guild)
 
 def valid_link(url):
     return bool(url) and url.strip().lower().startswith(
         ("http://", "https://", "discord://")
     )
-
 
 def add_link(view, label, emoji, url):
     if not url:
@@ -219,7 +219,6 @@ def add_link(view, label, emoji, url):
         return
     view.add_item(discord.ui.Button(url=url, label=label, emoji=partial))
 
-
 def notify_view(settings, jump_url):
     view = discord.ui.View(timeout=None)
     add_link(view, settings.get("notify_jump_label", "view order"),
@@ -227,14 +226,6 @@ def notify_view(settings, jump_url):
     add_link(view, settings.get("notify_link_label"),
              settings.get("notify_link_emoji"), settings.get("notify_link_url"))
     return view if view.children else None
-
-
-def completed_view(settings):
-    view = discord.ui.View(timeout=None)
-    add_link(view, settings.get("vouch_label", "vouch"),
-             settings.get("vouch_emoji"), settings.get("vouch_url"))
-    return view if view.children else None
-
 
 def stamp_values(guild, order):
     stamp = int(order.get("created_at") or 0)
@@ -250,7 +241,6 @@ def stamp_values(guild, order):
         "queued": f"<t:{stamp}:R>",
     }
 
-
 def order_values(guild, settings, order):
     values = {
         "user": f"<@{order['user_id']}>",
@@ -265,14 +255,12 @@ def order_values(guild, settings, order):
     values.update(stamp_values(guild, order))
     return values
 
-
 IMAGE_URL = re.compile(
     r"(?<![(\[<])\bhttps?://[^\s<>()\[\]]+?"
     r"\.(?:png|jpe?g|gif|webp|avif)"
     r"(?:\?[^\s<>()\[\]]*)?",
     re.IGNORECASE,
 )
-
 
 def split_image(body):
     matches = list(IMAGE_URL.finditer(body))
@@ -283,14 +271,6 @@ def split_image(body):
     trimmed = body[: last.start()] + body[last.end() :]
     return trimmed.strip(), last.group(0)
 
-
-def updated_by_name(guild, order):
-    if not order.get("updated_by") or guild is None:
-        return None
-    member = guild.get_member(order["updated_by"])
-    return member.display_name if member else None
-
-
 def order_embed(guild, settings, order):
     body = render(settings["template"], order_values(guild, settings, order), guild)
     body, image_url = split_image(body)
@@ -299,39 +279,20 @@ def order_embed(guild, settings, order):
     if image_url:
         embed.set_image(url=image_url)
 
-    name = updated_by_name(guild, order)
-    if name:
-        embed.set_footer(text=f"last updated by {name}")
+    if order.get("updated_by"):
+        member = guild.get_member(order["updated_by"]) if guild else None
+        if member:
+            embed.set_footer(text=f"last updated by {member.display_name}")
     return embed
-
 
 def order_text(guild, settings, order):
     body = render(settings["template"], order_values(guild, settings, order), guild)
-    name = updated_by_name(guild, order)
-    if name:
-        body = f"{body}\n-# last updated by {name}"
+    if order.get("updated_by"):
+        member = guild.get_member(order["updated_by"]) if guild else None
+        if member:
+            body = f"{body}\n-# last updated by {member.display_name}"
     body = body.strip()
     return body[:2000] if body else "\u200b"
-
-
-def use_embed(settings):
-    return (settings.get("style") or DEFAULT_STYLE) != "text"
-
-
-def order_payload(guild, settings, order, ping=False):
-    mention = f"<@{order['user_id']}>"
-
-    if use_embed(settings):
-        return {
-            "content": mention if ping else None,
-            "embed": order_embed(guild, settings, order),
-        }
-
-    body = order_text(guild, settings, order)
-    if ping and mention not in body:
-        body = f"{mention}\n{body}"[:2000]
-    return {"content": body, "embed": None}
-
 
 def can_update(member, order):
     return (
@@ -339,12 +300,10 @@ def can_update(member, order):
         or member.guild_permissions.manage_messages
     )
 
-
 def channel_name_for(status_text, opener):
     raw = f"{status_text}-{opener}"
     name = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
     return name[:100] or "ticket"
-
 
 async def rename_source(guild, settings, order):
     channel_id = order.get("source_channel_id")
@@ -364,17 +323,18 @@ async def rename_source(guild, settings, order):
     except (discord.Forbidden, discord.HTTPException):
         pass
 
-
 _rename_tasks = set()
 
-
 def schedule_rename(guild, settings, order):
-    if not settings.get("rename", True):
-        return
     task = asyncio.create_task(rename_source(guild, settings, order))
     _rename_tasks.add(task)
     task.add_done_callback(_rename_tasks.discard)
 
+def completed_view(settings):
+    view = discord.ui.View(timeout=None)
+    add_link(view, settings.get("vouch_label", "vouch"),
+             settings.get("vouch_emoji"), settings.get("vouch_url"))
+    return view if view.children else None
 
 async def send_completed(guild, settings, order):
     if order.get("completed_sent"):
@@ -404,7 +364,6 @@ async def send_completed(guild, settings, order):
         save_orders()
     except discord.HTTPException:
         pass
-
 
 class StatusSelect(discord.ui.Select):
 
@@ -468,20 +427,19 @@ class StatusSelect(discord.ui.Select):
         save_orders()
 
         await interaction.response.edit_message(
+            content=order_text(interaction.guild, settings, order),
+            embed=None,
             view=QueueView(settings, chosen),
-            **order_payload(interaction.guild, settings, order),
         )
 
         await send_completed(interaction.guild, settings, order)
         schedule_rename(interaction.guild, settings, order)
-
 
 class QueueView(discord.ui.View):
 
     def __init__(self, settings, current=None):
         super().__init__(timeout=None)
         self.add_item(StatusSelect(settings, current))
-
 
 class TemplateModal(discord.ui.Modal, title="Queue Format"):
     def __init__(self, builder):
@@ -549,13 +507,6 @@ class TemplateModal(discord.ui.Modal, title="Queue Format"):
                 "that link instead."
             )
 
-        if banner and not use_embed(self.builder.settings):
-            notes.append(
-                "the post style is set to plain text, so that image link "
-                "will show as a link preview instead of a banner. switch "
-                "the style to embed if you want it framed."
-            )
-
         if notes:
             await interaction.followup.send(
                 embed=embeds.error(
@@ -567,7 +518,6 @@ class TemplateModal(discord.ui.Modal, title="Queue Format"):
                 ),
                 ephemeral=True,
             )
-
 
 class NotifyModal(discord.ui.Modal, title="Queued Message"):
     def __init__(self, builder):
@@ -588,7 +538,6 @@ class NotifyModal(discord.ui.Modal, title="Queued Message"):
         self.builder.settings["notify"] = self.f_text.value.strip()
         save_config()
         await self.builder.refresh()
-
 
 class NotifyButtonsModal(discord.ui.Modal, title="Queued Message Buttons"):
     def __init__(self, builder):
@@ -672,7 +621,6 @@ class NotifyButtonsModal(discord.ui.Modal, title="Queued Message Buttons"):
         s["notify_link_emoji"] = link_emoji
         save_config()
         await self.builder.refresh()
-
 
 class CompletedModal(discord.ui.Modal, title="Completed Message"):
     def __init__(self, builder):
@@ -767,7 +715,6 @@ class CompletedModal(discord.ui.Modal, title="Completed Message"):
                 embed=embeds.error(note, title="Check the status"), ephemeral=True
             )
 
-
 class StatusModal(discord.ui.Modal, title="Status"):
     def __init__(self, builder, existing=None):
         super().__init__()
@@ -834,7 +781,6 @@ class StatusModal(discord.ui.Modal, title="Status"):
         save_config()
         await self.builder.refresh()
 
-
 class StatusManageView(discord.ui.View):
     def __init__(self, builder, entry):
         super().__init__(timeout=300)
@@ -847,17 +793,13 @@ class StatusManageView(discord.ui.View):
     def summary(self):
         settings = self.builder.settings
         first = statuses_of(settings)[0]["key"] == self.entry["key"]
-        completed = (
-            settings.get("completed_status") or "done"
-        ) == self.entry["key"]
 
         return embeds.build(
             f"**Icon** - {self.entry.get('emoji') or 'none'}\n"
             f"**Description** - "
             f"{self.entry.get('description') or DEFAULT_OPTION_TEXT}\n"
             f"**In the menu** - {'yes' if in_menu(self.entry) else 'no'}\n"
-            f"**Starting status** - {'yes' if first else 'no'}\n"
-            f"**Counts as completed** - {'yes' if completed else 'no'}",
+            f"**Starting status** - {'yes' if first else 'no'}",
             title=f"Status: {self.entry['label']}",
         )
 
@@ -896,16 +838,7 @@ class StatusManageView(discord.ui.View):
         )
         await self.builder.refresh()
 
-    @discord.ui.button(label="mark as completed", style=discord.ButtonStyle.secondary, row=2)
-    async def make_completed(self, interaction, button):
-        self.builder.settings["completed_status"] = self.entry["key"]
-        save_config()
-        await interaction.response.edit_message(
-            embed=self.summary(), view=self
-        )
-        await self.builder.refresh()
-
-    @discord.ui.button(label="delete", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="delete", style=discord.ButtonStyle.secondary, row=2)
     async def delete(self, interaction, button):
         statuses = self.builder.settings["statuses"]
 
@@ -923,7 +856,6 @@ class StatusManageView(discord.ui.View):
         )
         await self.builder.refresh()
         self.stop()
-
 
 class StatusPickSelect(discord.ui.Select):
     def __init__(self, builder):
@@ -956,7 +888,6 @@ class StatusPickSelect(discord.ui.Select):
             embed=manage.summary(), view=manage
         )
 
-
 class PlaceholderModal(discord.ui.Modal, title="Menu Text"):
     def __init__(self, builder):
         super().__init__()
@@ -978,7 +909,6 @@ class PlaceholderModal(discord.ui.Modal, title="Menu Text"):
         save_config()
         await self.builder.refresh()
 
-
 class StatusesView(discord.ui.View):
     def __init__(self, builder):
         super().__init__(timeout=300)
@@ -988,7 +918,7 @@ class StatusesView(discord.ui.View):
     async def interaction_check(self, interaction):
         return interaction.user.id == self.builder.ctx.author.id
 
-    @discord.ui.button(label="add status", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="add status", style=discord.ButtonStyle.secondary, row=1)
     async def add(self, interaction, button):
         if len(statuses_of(self.builder.settings)) >= MAX_STATUSES:
             await interaction.response.send_message(
@@ -1002,7 +932,7 @@ class StatusesView(discord.ui.View):
     async def menu_text(self, interaction, button):
         await interaction.response.send_modal(PlaceholderModal(self.builder))
 
-    @discord.ui.button(label="reset to defaults", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="reset to defaults", style=discord.ButtonStyle.secondary, row=1)
     async def reset(self, interaction, button):
         self.builder.settings["statuses"] = [dict(s) for s in DEFAULT_STATUSES]
         save_config()
@@ -1011,7 +941,6 @@ class StatusesView(discord.ui.View):
         )
         await self.builder.refresh()
         self.stop()
-
 
 class ChannelView(discord.ui.View):
     def __init__(self, builder):
@@ -1032,45 +961,6 @@ class ChannelView(discord.ui.View):
         self.builder.settings["channel_id"] = select.values[0].id
         save_config()
         await self.builder.refresh()
-
-
-class ExtrasView(discord.ui.View):
-    def __init__(self, builder):
-        super().__init__(timeout=300)
-        self.builder = builder
-
-    async def interaction_check(self, interaction):
-        return interaction.user.id == self.builder.ctx.author.id
-
-    @discord.ui.button(label="queued msg", style=discord.ButtonStyle.secondary, row=0)
-    async def queued_msg(self, interaction, button):
-        await interaction.response.send_modal(NotifyModal(self.builder))
-
-    @discord.ui.button(label="queued buttons", style=discord.ButtonStyle.secondary, row=0)
-    async def queued_buttons(self, interaction, button):
-        await interaction.response.send_modal(NotifyButtonsModal(self.builder))
-
-    @discord.ui.button(label="completed msg", style=discord.ButtonStyle.secondary, row=0)
-    async def completed_msg(self, interaction, button):
-        await interaction.response.send_modal(CompletedModal(self.builder))
-
-    @discord.ui.button(label="toggle renaming", style=discord.ButtonStyle.secondary, row=1)
-    async def toggle_rename(self, interaction, button):
-        settings = self.builder.settings
-        settings["rename"] = not settings.get("rename", True)
-        save_config()
-        await interaction.response.edit_message(
-            embed=embeds.notice(
-                "ticket channels get renamed to `status-username` on every "
-                "status change."
-                if settings["rename"]
-                else "ticket channels are left alone.",
-                title="Channel renaming",
-            ),
-            view=self,
-        )
-        await self.builder.refresh()
-
 
 class SetupView(discord.ui.View):
 
@@ -1111,27 +1001,16 @@ class SetupView(discord.ui.View):
         settings = self.settings
         channel = guild.get_channel(settings.get("channel_id"))
 
-        buttons = settings.get("notify_jump_label", "view order") or "none"
-        if settings.get("notify_link_url"):
-            buttons += f" · {settings.get('notify_link_label') or 'link'}"
-
-        completed = (settings.get("completed") or "off")[:60]
-        if settings.get("vouch_url"):
-            completed += f" → {settings.get('vouch_label') or 'vouch'}"
-
         lines = [
             f"**Drops in** - {channel.mention if channel else 'not set'}",
-            f"**Post style** - {'embed' if use_embed(settings) else 'plain text'}",
-            f"**Pings the customer** - {'yes' if settings.get('ping', True) else 'no'}",
+            f"**Pings the customer** - {'yes' if settings['ping'] else 'no'}",
             f"**Starts at** - {statuses_of(settings)[0]['label']}",
-            f"**Counts as completed** - "
-            f"{status_label(settings, settings.get('completed_status') or 'done')}",
             f"**Menu says** - {settings.get('placeholder') or DEFAULT_PLACEHOLDER}",
             f"**Queued msg** - {(settings.get('notify') or 'off')[:80]}",
-            f"**Queued buttons** - {buttons}",
-            f"**Completed msg** - {completed}",
-            f"**Renames the ticket** - "
-            f"{'yes' if settings.get('rename', True) else 'no'}",
+            f"**Queued buttons** - {(settings.get('notify_jump_label', 'view order') or 'none')}"
+            + (f" · {settings.get('notify_link_label') or 'link'}" if settings.get('notify_link_url') else ""),
+            f"**Completed msg** - {(settings.get('completed') or 'off')[:60]}"
+            + (f" → {settings.get('vouch_label', 'vouch') or 'vouch'}" if settings.get('vouch_url') else ""),
             "",
             "**Statuses**",
         ]
@@ -1149,7 +1028,7 @@ class SetupView(discord.ui.View):
             inline=False,
         )
         embed.set_footer(
-            text="channel · format · statuses · messages · style — all editable below"
+            text="channel · format · statuses · ping — all editable below"
         )
         embed.add_field(
             name="Status menu",
@@ -1188,25 +1067,24 @@ class SetupView(discord.ui.View):
     async def statuses(self, interaction, button):
         await interaction.response.send_message(
             embed=embeds.notice(
-                "add a status, or pick one to change its icon, whether it "
-                "gets a menu slot, and whether it counts as completed."
+                "add a status, or pick one to change its colour, icon and "
+                "whether it gets a button."
             ),
             view=StatusesView(self),
             ephemeral=True,
         )
 
-    @discord.ui.button(label="messages", style=discord.ButtonStyle.secondary, row=0)
-    async def messages(self, interaction, button):
-        await interaction.response.send_message(
-            embed=embeds.notice(
-                "the queued message goes where the order was taken. the "
-                "completed message goes there too once the order hits the "
-                "completed status.",
-                title="Extra messages",
-            ),
-            view=ExtrasView(self),
-            ephemeral=True,
-        )
+    @discord.ui.button(label="queued msg", style=discord.ButtonStyle.secondary, row=0)
+    async def queued_msg(self, interaction, button):
+        await interaction.response.send_modal(NotifyModal(self))
+
+    @discord.ui.button(label="queued buttons", style=discord.ButtonStyle.secondary, row=0)
+    async def queued_buttons(self, interaction, button):
+        await interaction.response.send_modal(NotifyButtonsModal(self))
+
+    @discord.ui.button(label="completed msg", style=discord.ButtonStyle.secondary, row=1)
+    async def completed_msg(self, interaction, button):
+        await interaction.response.send_modal(CompletedModal(self))
 
     @discord.ui.button(label="fields", style=discord.ButtonStyle.secondary, row=1)
     async def fields(self, interaction, button):
@@ -1223,27 +1101,19 @@ class SetupView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="post style", style=discord.ButtonStyle.secondary, row=1)
-    async def post_style(self, interaction, button):
-        await interaction.response.defer()
-        self.settings["style"] = "text" if use_embed(self.settings) else "embed"
-        save_config()
-        await self.refresh()
-
     @discord.ui.button(label="toggle ping", style=discord.ButtonStyle.secondary, row=1)
     async def toggle_ping(self, interaction, button):
         await interaction.response.defer()
-        self.settings["ping"] = not self.settings.get("ping", True)
+        self.settings["ping"] = not self.settings["ping"]
         save_config()
         await self.refresh()
 
-    @discord.ui.button(label="reset format", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="reset format", style=discord.ButtonStyle.secondary, row=1)
     async def reset_format(self, interaction, button):
         await interaction.response.defer()
         self.settings["template"] = DEFAULT_TEMPLATE
         save_config()
         await self.refresh()
-
 
 class ConfirmView(discord.ui.View):
 
@@ -1283,26 +1153,7 @@ class ConfirmView(discord.ui.View):
         await interaction.response.defer()
         self.channel_id = select.values[0].id
 
-    async def announce(self, guild, channel, sent, ping):
-        values = order_values(guild, self.settings, self.order)
-        values.update({"channel": channel.mention, "link": sent.jump_url})
-        notify = render_notify(
-            self.settings.get("notify", DEFAULT_NOTIFY), values, guild
-        ).strip()
-        if not notify:
-            return
-        try:
-            await self.ctx.channel.send(
-                content=notify[:2000],
-                view=notify_view(self.settings, sent.jump_url),
-                allowed_mentions=discord.AllowedMentions(
-                    everyone=False, roles=False, users=ping
-                ),
-            )
-        except discord.HTTPException:
-            pass
-
-    @discord.ui.button(label="post", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="post", style=discord.ButtonStyle.secondary, row=1)
     async def post(self, interaction, button):
         if self.channel_id is None:
             await interaction.response.send_message(
@@ -1328,13 +1179,15 @@ class ConfirmView(discord.ui.View):
         ping = self.settings.get("ping", True)
 
         try:
+            body = order_text(interaction.guild, self.settings, self.order)
+            mention = f"<@{self.order['user_id']}>"
+            if ping and mention not in body:
+                body = f"{mention}\n{body}"[:2000]
             sent = await channel.send(
+                content=body,
                 view=QueueView(self.settings, self.order["status"]),
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False, users=ping
-                ),
-                **order_payload(
-                    interaction.guild, self.settings, self.order, ping
                 ),
             )
         except discord.Forbidden:
@@ -1355,7 +1208,23 @@ class ConfirmView(discord.ui.View):
         save_orders()
 
         schedule_rename(interaction.guild, self.settings, self.order)
-        await self.announce(interaction.guild, channel, sent, ping)
+
+        values = order_values(interaction.guild, self.settings, self.order)
+        values.update({"channel": channel.mention, "link": sent.jump_url})
+        notify = render_notify(
+            self.settings.get("notify", DEFAULT_NOTIFY), values, interaction.guild
+        ).strip()
+        if notify:
+            try:
+                await self.ctx.channel.send(
+                    content=notify[:2000],
+                    view=notify_view(self.settings, sent.jump_url),
+                    allowed_mentions=discord.AllowedMentions(
+                        everyone=False, roles=False, users=ping
+                    ),
+                )
+            except discord.HTTPException:
+                pass
 
         for item in self.children:
             item.disabled = True
@@ -1384,7 +1253,6 @@ class ConfirmView(discord.ui.View):
             view=self,
         )
         self.stop()
-
 
 class Queue(commands.Cog):
 
@@ -1470,10 +1338,10 @@ class Queue(commands.Cog):
 
         view = ConfirmView(ctx, settings, order)
         view.message = await ctx.send(
+            content=order_text(ctx.guild, settings, order),
             view=view,
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
-            **order_payload(ctx.guild, settings, order),
         )
 
     @queue.command(
@@ -1522,7 +1390,7 @@ class Queue(commands.Cog):
             )
             return
 
-        entry = status_by_name(settings, status)
+        entry = find_status(settings, status.strip().lower())
         if entry is None:
             listed = ", ".join(s["key"] for s in statuses_of(settings))
             await embeds.send(
@@ -1538,8 +1406,9 @@ class Queue(commands.Cog):
         try:
             target = await channel.fetch_message(int(raw))
             await target.edit(
+                content=order_text(ctx.guild, settings, order),
+                embed=None,
                 view=QueueView(settings, entry["key"]),
-                **order_payload(ctx.guild, settings, order),
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
@@ -1561,7 +1430,6 @@ class Queue(commands.Cog):
             for s in statuses_of(settings)
             if current in s["key"].lower()
         ][:25]
-
 
 async def setup(bot):
     await bot.add_cog(Queue(bot))
