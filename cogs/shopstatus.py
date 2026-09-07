@@ -417,7 +417,7 @@ class ShopStatus(commands.Cog):
 
     @commands.hybrid_command(
         name="shopstatus",
-        aliases=["shop"],
+        aliases=["shopstat", "hours"],
         description="Set up automatic open, closed and hiatus posts.",
     )
     @app_commands.default_permissions(manage_messages=True)
