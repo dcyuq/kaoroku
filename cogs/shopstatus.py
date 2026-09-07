@@ -14,30 +14,25 @@ log = logging.getLogger(__name__)
 
 FORMAT_LIMIT = 3000
 
-# U+3164 hangul filler. Discord renders it as a wide blank, so the dessert
-# emoji and the text after it line up the way the rest of the bot does.
-PAD = "ㅤ"
-
 DEFAULT_OPEN_FORMAT = (
-    f":03dc_cake:{PAD}we're open\n"
-    f"{PAD}\n"
-    f":shortcake1:{PAD}orders are open until {{close}}. come on in!\n"
-    f":dndexl:{PAD}{{date}}"
+    "**we're open**\n"
+    "\n"
+    "orders are open until {close}. come on in!\n"
+    "{date}"
 )
 
 DEFAULT_CLOSED_FORMAT = (
-    f":03dc_cake:{PAD}we're closed\n"
-    f"{PAD}\n"
-    f":shortcake1:{PAD}we open again at {{open}}. see you then.\n"
-    f":dndexl:{PAD}{{date}}"
+    "**we're closed**\n"
+    "\n"
+    "we open again at {open}. see you then.\n"
+    "{date}"
 )
 
 DEFAULT_HIATUS_FORMAT = (
-    f":03dc_cake:{PAD}on hiatus\n"
-    f"{PAD}\n"
-    f":shortcake1:{PAD}the shop is taking a short break, back soon. "
-    f"thank you for your patience.\n"
-    f":dndexl:{PAD}{{date}}"
+    "**on hiatus**\n"
+    "\n"
+    "the shop is taking a short break, back soon. thank you for your patience.\n"
+    "{date}"
 )
 
 STATE_LABELS = {"open": "open", "closed": "closed", "hiatus": "on hiatus"}
@@ -78,6 +73,8 @@ def defaults():
         "open_format": DEFAULT_OPEN_FORMAT,
         "closed_format": DEFAULT_CLOSED_FORMAT,
         "hiatus_format": DEFAULT_HIATUS_FORMAT,
+        "use_embed": True,
+        "last_message_id": None,
         "state": None,
     }
 
@@ -161,13 +158,29 @@ async def post_state(guild, settings, state):
     if channel is None:
         return False
     try:
-        await channel.send(
-            embed=state_embed(guild, settings, state),
-            allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True),
-        )
-        return True
+        if settings.get("use_embed", True):
+            sent = await channel.send(
+                embed=state_embed(guild, settings, state),
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True),
+            )
+        else:
+            body = render(settings[FORMAT_KEYS[state]], guild, settings)[:2000]
+            if not body:
+                return False
+            sent = await channel.send(
+                content=body,
+                allowed_mentions=discord.AllowedMentions.all(),
+            )
     except (discord.Forbidden, discord.HTTPException):
         return False
+    old_id = settings.get("last_message_id")
+    if old_id and old_id != sent.id:
+        try:
+            await channel.get_partial_message(old_id).delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+    settings["last_message_id"] = sent.id
+    return True
 
 
 async def sync_state(guild, force=False):
@@ -281,6 +294,7 @@ class SetupView(discord.ui.View):
             f"**now** : {now_label}",
             f"**channel** : {channel.mention if channel else 'not set'}",
             f"**opens** : {settings['open_time']}    **closes** : {settings['close_time']}",
+            f"**output** : {'embed' if settings.get('use_embed', True) else 'raw text'}",
             "",
             f"**preview ({STATE_LABELS[preview_state]})**",
             preview,
@@ -320,6 +334,12 @@ class SetupView(discord.ui.View):
     async def hiatus_format(self, interaction, button):
         await interaction.response.send_modal(FormatModal(self, "hiatus"))
 
+    @discord.ui.button(label="embed / text", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_output(self, interaction, button):
+        self.settings["use_embed"] = not self.settings.get("use_embed", True)
+        save_config()
+        await self.refresh(interaction)
+
     @discord.ui.button(label="open time", style=discord.ButtonStyle.secondary, row=2)
     async def open_time(self, interaction, button):
         await interaction.response.send_modal(TimeModal(self, "open_time"))
@@ -355,8 +375,6 @@ class SetupView(discord.ui.View):
 
 
 class ShopStatus(commands.Cog):
-    """Automatic open, closed and hiatus shop status posts."""
-
     def __init__(self, bot):
         self.bot = bot
 
@@ -399,7 +417,7 @@ class ShopStatus(commands.Cog):
 
     @commands.hybrid_command(
         name="shopstatus",
-        aliases=["sstatus"],
+        aliases=["shop"],
         description="Set up automatic open, closed and hiatus posts.",
     )
     @app_commands.default_permissions(manage_messages=True)
