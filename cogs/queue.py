@@ -45,6 +45,7 @@ DEFAULT_TEMPLATE = (
 DEFAULT_PLACEHOLDER = "update order status"
 DEFAULT_OPTION_TEXT = "change order status"
 DEFAULT_NOTIFY = "order queued in {channel}"
+DEFAULT_STYLE = "text"
 
 DEFAULT_STATUSES = [
     {"key": "noted", "label": "noted", "emoji": None,
@@ -126,6 +127,7 @@ def ensure_config(guild_id):
             "template": DEFAULT_TEMPLATE,
             "notify": DEFAULT_NOTIFY,
             "ping": True,
+            "style": DEFAULT_STYLE,
             "placeholder": DEFAULT_PLACEHOLDER,
             "statuses": [dict(s) for s in DEFAULT_STATUSES],
         }
@@ -134,6 +136,7 @@ def ensure_config(guild_id):
     settings.setdefault("template", DEFAULT_TEMPLATE)
     settings.setdefault("notify", DEFAULT_NOTIFY)
     settings.setdefault("ping", True)
+    settings.setdefault("style", DEFAULT_STYLE)
     settings.setdefault("placeholder", DEFAULT_PLACEHOLDER)
     settings.setdefault("channel_id", None)
     if not settings.get("statuses"):
@@ -146,6 +149,7 @@ def settings_for(guild_id):
         "template": DEFAULT_TEMPLATE,
         "notify": DEFAULT_NOTIFY,
         "ping": True,
+        "style": DEFAULT_STYLE,
         "placeholder": DEFAULT_PLACEHOLDER,
         "statuses": [dict(s) for s in DEFAULT_STATUSES],
     }
@@ -271,6 +275,12 @@ def split_image(body):
     trimmed = body[: last.start()] + body[last.end() :]
     return trimmed.strip(), last.group(0)
 
+def updated_by_name(guild, order):
+    if not order.get("updated_by") or guild is None:
+        return None
+    member = guild.get_member(order["updated_by"])
+    return member.display_name if member else None
+
 def order_embed(guild, settings, order):
     body = render(settings["template"], order_values(guild, settings, order), guild)
     body, image_url = split_image(body)
@@ -279,20 +289,35 @@ def order_embed(guild, settings, order):
     if image_url:
         embed.set_image(url=image_url)
 
-    if order.get("updated_by"):
-        member = guild.get_member(order["updated_by"]) if guild else None
-        if member:
-            embed.set_footer(text=f"last updated by {member.display_name}")
+    name = updated_by_name(guild, order)
+    if name:
+        embed.set_footer(text=f"last updated by {name}")
     return embed
 
 def order_text(guild, settings, order):
     body = render(settings["template"], order_values(guild, settings, order), guild)
-    if order.get("updated_by"):
-        member = guild.get_member(order["updated_by"]) if guild else None
-        if member:
-            body = f"{body}\n-# last updated by {member.display_name}"
+    name = updated_by_name(guild, order)
+    if name:
+        body = f"{body}\n-# last updated by {name}"
     body = body.strip()
     return body[:2000] if body else "\u200b"
+
+def use_embed(settings):
+    return (settings.get("style") or DEFAULT_STYLE) == "embed"
+
+def order_payload(guild, settings, order, ping=False):
+    mention = f"<@{order['user_id']}>"
+
+    if use_embed(settings):
+        return {
+            "content": mention if ping else None,
+            "embed": order_embed(guild, settings, order),
+        }
+
+    body = order_text(guild, settings, order)
+    if ping and mention not in body:
+        body = f"{mention}\n{body}"[:2000]
+    return {"content": body, "embed": None}
 
 def can_update(member, order):
     return (
@@ -427,9 +452,8 @@ class StatusSelect(discord.ui.Select):
         save_orders()
 
         await interaction.response.edit_message(
-            content=order_text(interaction.guild, settings, order),
-            embed=None,
             view=QueueView(settings, chosen),
+            **order_payload(interaction.guild, settings, order),
         )
 
         await send_completed(interaction.guild, settings, order)
@@ -505,6 +529,13 @@ class TemplateModal(discord.ui.Modal, title="Queue Format"):
                 "working after about a day. upload the image somewhere that "
                 "keeps it, or post it in a channel nobody deletes and use "
                 "that link instead."
+            )
+
+        if banner and not use_embed(self.builder.settings):
+            notes.append(
+                "the post style is raw text, so that image shows as a link "
+                "preview instead of a framed banner. switch the style to "
+                "embed if you want it framed."
             )
 
         if notes:
@@ -1003,6 +1034,7 @@ class SetupView(discord.ui.View):
 
         lines = [
             f"**Drops in** - {channel.mention if channel else 'not set'}",
+            f"**Post style** - {'embed' if use_embed(settings) else 'raw text'}",
             f"**Pings the customer** - {'yes' if settings['ping'] else 'no'}",
             f"**Starts at** - {statuses_of(settings)[0]['label']}",
             f"**Menu says** - {settings.get('placeholder') or DEFAULT_PLACEHOLDER}",
@@ -1028,7 +1060,7 @@ class SetupView(discord.ui.View):
             inline=False,
         )
         embed.set_footer(
-            text="channel · format · statuses · ping — all editable below"
+            text="channel · format · statuses · style · ping — all editable below"
         )
         embed.add_field(
             name="Status menu",
@@ -1085,6 +1117,13 @@ class SetupView(discord.ui.View):
     @discord.ui.button(label="completed msg", style=discord.ButtonStyle.secondary, row=1)
     async def completed_msg(self, interaction, button):
         await interaction.response.send_modal(CompletedModal(self))
+
+    @discord.ui.button(label="embed / text", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_style(self, interaction, button):
+        await interaction.response.defer()
+        self.settings["style"] = "text" if use_embed(self.settings) else "embed"
+        save_config()
+        await self.refresh()
 
     @discord.ui.button(label="fields", style=discord.ButtonStyle.secondary, row=1)
     async def fields(self, interaction, button):
@@ -1179,15 +1218,13 @@ class ConfirmView(discord.ui.View):
         ping = self.settings.get("ping", True)
 
         try:
-            body = order_text(interaction.guild, self.settings, self.order)
-            mention = f"<@{self.order['user_id']}>"
-            if ping and mention not in body:
-                body = f"{mention}\n{body}"[:2000]
             sent = await channel.send(
-                content=body,
                 view=QueueView(self.settings, self.order["status"]),
                 allowed_mentions=discord.AllowedMentions(
                     everyone=False, roles=False, users=ping
+                ),
+                **order_payload(
+                    interaction.guild, self.settings, self.order, ping
                 ),
             )
         except discord.Forbidden:
@@ -1338,10 +1375,10 @@ class Queue(commands.Cog):
 
         view = ConfirmView(ctx, settings, order)
         view.message = await ctx.send(
-            content=order_text(ctx.guild, settings, order),
             view=view,
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
+            **order_payload(ctx.guild, settings, order),
         )
 
     @queue.command(
@@ -1390,7 +1427,7 @@ class Queue(commands.Cog):
             )
             return
 
-        entry = find_status(settings, status.strip().lower())
+        entry = status_by_name(settings, status)
         if entry is None:
             listed = ", ".join(s["key"] for s in statuses_of(settings))
             await embeds.send(
@@ -1406,9 +1443,8 @@ class Queue(commands.Cog):
         try:
             target = await channel.fetch_message(int(raw))
             await target.edit(
-                content=order_text(ctx.guild, settings, order),
-                embed=None,
                 view=QueueView(settings, entry["key"]),
+                **order_payload(ctx.guild, settings, order),
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
