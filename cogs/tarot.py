@@ -24,9 +24,9 @@ _reading_store = Store("tarot.json", default=list)
 config = _config_store.load()
 readings = _reading_store.load()
 
-TEMPLATE_LIMIT = 3800
-READING_LIMIT = 3000
-COOLDOWN_SECONDS = 15
+TEMPLATE_LIMIT = 4000
+READING_LIMIT = 4000
+COOLDOWN_SECONDS = 5
 
 # U+3164 hangul filler. Discord renders it as a wide blank.
 PAD = "\u3164"
