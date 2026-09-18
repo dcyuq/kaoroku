@@ -531,18 +531,6 @@ async def create_ticket(interaction, button_data, answers):
     guild = interaction.guild
     settings = get_config(guild.id)
 
-    existing = open_ticket_for(guild.id, interaction.user.id)
-    if existing is not None:
-        channel = guild.get_channel(existing)
-        if channel is not None:
-            await interaction.followup.send(
-                embed=embeds.error(f"you already have an open ticket: {channel.mention}"),
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        tickets.pop(existing, None)
-        save_tickets()
 
     category_id = button_data.get("category_id") or settings["category_id"]
     category = guild.get_channel(category_id)
