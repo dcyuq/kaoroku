@@ -119,6 +119,8 @@ DEFAULT_BUTTON = {
     "category_id": None,
     "welcome": "Describe your issue and someone will be with you shortly.",
     "questions": [],
+    "is_order": False,
+    "channel_name": "",
 }
 
 
@@ -527,6 +529,72 @@ async def send_log(guild, embed):
         pass
 
 
+def answer_context(answers, button_data=None):
+    context = {}
+    questions = (button_data or {}).get("questions", [])
+    for index, (label, answer) in enumerate(answers):
+        value = (answer or "").strip()
+        label = (label or "").strip()
+        if label:
+            context[label.lower()] = value
+            context[re.sub(r"\s+", "_", label.lower())] = value
+        if index < len(questions):
+            variable = (questions[index].get("variable") or "").strip().strip("{}").strip()
+            if variable:
+                context[variable] = value
+                context[variable.lower()] = value
+    return context
+
+
+def format_ticket_text(template, answers, button_data=None, extra=None):
+    if not template:
+        return template
+
+    context = answer_context(answers, button_data)
+    if extra:
+        for key, value in extra.items():
+            if key is None:
+                continue
+            key = str(key).strip()
+            context[key] = "" if value is None else str(value)
+            context[key.lower()] = "" if value is None else str(value)
+
+    def replace_var(match):
+        key = match.group(1).strip()
+        if key in context:
+            return str(context[key])
+        if key.lower() in context:
+            return str(context[key.lower()])
+        return match.group(0)
+
+    return re.sub(r"\{([^{}]+)\}", replace_var, template)
+
+
+def slugify_channel(text, fallback):
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return slug[:100] or fallback
+
+
+def order_channel_name(button_data, user, number, answers):
+    fallback = f"ticket-{number:04d}"
+    if not button_data.get("is_order") or not button_data.get("channel_name"):
+        return fallback
+    raw = format_ticket_text(
+        button_data["channel_name"],
+        answers,
+        button_data,
+        extra={
+            "opener": user.name,
+            "username": user.name,
+            "user": user.name,
+            "number": f"{number:04d}",
+            "ticket_number": f"{number:04d}",
+        },
+    )
+    raw = re.sub(r"\{[^{}]*\}", "", raw)
+    return slugify_channel(raw, fallback)
+
+
 async def create_ticket(interaction, button_data, answers):
     guild = interaction.guild
     settings = get_config(guild.id)
@@ -576,7 +644,7 @@ async def create_ticket(interaction, button_data, answers):
 
     try:
         channel = await guild.create_text_channel(
-            name=f"ticket-{number:04d}",
+            name=order_channel_name(button_data, interaction.user, number, answers),
             category=category,
             overwrites=overwrites,
             reason=f"Ticket opened by {interaction.user}",
@@ -604,9 +672,22 @@ async def create_ticket(interaction, button_data, answers):
     }
     save_tickets()
 
+    welcome = format_ticket_text(
+        button_data.get("welcome") or DEFAULT_BUTTON["welcome"],
+        answers,
+        button_data,
+        extra={
+            "user": interaction.user.mention,
+            "username": interaction.user.name,
+            "guild_name": guild.name,
+            "ticket_number": f"{number:04d}",
+            "channel": channel.mention,
+        },
+    )
+
     embed = discord.Embed(
         title=f"Ticket {number:04d} - {button_data['label']}",
-        description=button_data.get("welcome") or DEFAULT_BUTTON["welcome"],
+        description=welcome,
         color=settings["panel"]["color"],
         timestamp=discord.utils.utcnow(),
     )
@@ -914,8 +995,9 @@ class TicketQuestionModal(discord.ui.Modal):
         for question in button_data["questions"][:MAX_QUESTIONS]:
             field = discord.ui.TextInput(
                 label=question["label"][:45],
+                placeholder=question.get("placeholder"),
                 style=discord.TextStyle.paragraph,
-                required=True,
+                required=question.get("required", True),
                 max_length=1000,
             )
             self.inputs.append((question["label"], field))
@@ -1213,6 +1295,8 @@ class ButtonEditModal(discord.ui.Modal, title="Ticket Button"):
                     "category_id": category_id,
                     "welcome": welcome,
                     "questions": [],
+                    "is_order": False,
+                    "channel_name": "",
                 }
             )
         else:
@@ -1234,13 +1318,21 @@ class QuestionsModal(discord.ui.Modal, title="Ticket Questions"):
         existing = button_data.get("questions", [])
         self.fields = []
         for i in range(MAX_QUESTIONS):
-            current = existing[i]["label"] if i < len(existing) else ""
+            current = ""
+            if i < len(existing):
+                q = existing[i]
+                parts = [q.get("label", "")]
+                if q.get("placeholder"):
+                    parts.append(q["placeholder"])
+                if q.get("variable"):
+                    parts.append("{" + q["variable"] + "}")
+                current = " | ".join(parts)
             field = discord.ui.TextInput(
                 label=f"Question {i + 1}",
                 default=current,
-                placeholder="Leave blank to skip",
+                placeholder="Label | Placeholder | {variable}",
                 required=False,
-                max_length=45,
+                max_length=150,
             )
             self.fields.append(field)
             self.add_item(field)
@@ -1251,11 +1343,42 @@ class QuestionsModal(discord.ui.Modal, title="Ticket Questions"):
         questions = []
         for field in self.fields:
             text = field.value.strip()
-            if text:
-                questions.append({"label": text})
+            if not text:
+                continue
+            parts = [p.strip() for p in text.split("|")]
+            if not parts[0]:
+                continue
+            entry = {"label": parts[0][:45]}
+            if len(parts) > 1 and parts[1]:
+                entry["placeholder"] = parts[1][:100]
+            if len(parts) > 2 and parts[2]:
+                entry["variable"] = parts[2].strip("{}")[:50]
+            questions.append(entry)
 
         self.button_data["questions"] = questions
         save_config()
+        await self.builder.refresh()
+
+
+class ChannelNameModal(discord.ui.Modal, title="Order Channel Name"):
+    def __init__(self, builder, button_data):
+        super().__init__()
+        self.builder = builder
+        self.button_data = button_data
+        self.f_template = discord.ui.TextInput(
+            label="Channel name template",
+            default=button_data.get("channel_name") or "",
+            placeholder="{order} - {quantity} - {opener}",
+            max_length=100,
+            required=False,
+        )
+        self.add_item(self.f_template)
+
+    async def on_submit(self, interaction):
+        self.button_data["channel_name"] = self.f_template.value.strip()
+        save_config()
+        refreshed = ButtonManageView(self.builder, self.button_data)
+        await interaction.response.edit_message(embed=refreshed.summary(), view=refreshed)
         await self.builder.refresh()
 
 
@@ -1411,17 +1534,25 @@ class ButtonManageView(discord.ui.View):
             mode = f"Asks {count} question(s) before opening"
             listed = "\n".join(
                 f"{i + 1}. {q['label']}"
+                + (f" → `{{{q['variable']}}}`" if q.get("variable") else "")
                 for i, q in enumerate(self.button_data["questions"])
             )
         else:
             mode = "Opens a ticket immediately"
             listed = "No questions set."
 
+        if self.button_data.get("is_order"):
+            template = self.button_data.get("channel_name") or "not set (uses ticket-0001)"
+            order_line = f"**Order button** - yes\n**Channel name** - `{template}`\n"
+        else:
+            order_line = "**Order button** - no\n"
+
         return discord.Embed(
             title=f"Button: {self.button_data['label']}",
             description=(
                 f"**Icon** - {icon_text(self.button_data)}\n"
                 f"**Colour** - {style_label(self.button_data.get('style'))}\n"
+                f"{order_line}"
                 f"**Behaviour** - {mode}\n\n"
                 f"{listed}"
             ),
@@ -1450,7 +1581,27 @@ class ButtonManageView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Delete Button", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Order Button", style=discord.ButtonStyle.secondary, row=2)
+    async def toggle_order(self, interaction, button):
+        self.button_data["is_order"] = not self.button_data.get("is_order")
+        save_config()
+        refreshed = ButtonManageView(self.builder, self.button_data)
+        await interaction.response.edit_message(embed=refreshed.summary(), view=refreshed)
+        await self.builder.refresh()
+
+    @discord.ui.button(label="Channel Name", style=discord.ButtonStyle.secondary, row=2)
+    async def channel_name(self, interaction, button):
+        if not self.button_data.get("is_order"):
+            await interaction.response.send_message(
+                embed=embeds.error("turn this into an order button first."),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            ChannelNameModal(self.builder, self.button_data)
+        )
+
+    @discord.ui.button(label="Delete Button", style=discord.ButtonStyle.danger, row=3)
     async def delete_button(self, interaction, button):
         await interaction.response.defer()
         if self.button_data in self.builder.settings["buttons"]:

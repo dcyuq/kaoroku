@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import embeds
+import templating
 from storage import Store
 
 try:
@@ -24,6 +25,35 @@ ALLOWED_SUFFIX = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 BLOCK_WORDS = ("off", "none", "no", "nothing", "remove")
 
+PAD = "ㅤ"
+
+CAPTION_LIMIT = 2000
+
+DEFAULT_CAPTION = (
+    f":03dc_cake:{PAD}{{user}}'s stamp card\n"
+    f":shortcake1:{PAD}{{count}} of {{total}} stamps, {{remaining}} to go"
+)
+
+CAPTION_FIELDS = (
+    "user", "name", "count", "total", "remaining", "completed", "next", "reward",
+)
+
+CAPTION_ALIASES = {
+    "user": "user", "member": "user", "them": "user", "owner": "user", "card": "user",
+    "name": "name", "display": "name", "display name": "name",
+    "count": "count", "stamps": "count", "current": "count", "have": "count",
+    "total": "total", "max": "total", "full": "total", "goal": "total", "card size": "total",
+    "remaining": "remaining", "left": "remaining", "to go": "remaining", "need": "remaining",
+    "completed": "completed", "cards": "completed", "finished": "completed", "redeemed": "completed",
+    "next": "next", "next reward": "next", "milestone": "next",
+    "reward": "reward", "prize": "reward", "perk": "reward",
+}
+
+CAPTION_SAMPLE = {
+    "user": "@himeko", "name": "himeko", "count": "3", "total": "8",
+    "remaining": "5", "completed": "1", "next": "5", "reward": "free cookie",
+}
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGE_ROOT = os.path.join(ROOT, "data", "stamp")
 
@@ -37,7 +67,7 @@ def stage_path(guild_id, filename):
 
 
 def default_config():
-    return {"stages": {}, "milestones": {}, "version": 0}
+    return {"stages": {}, "milestones": {}, "caption": DEFAULT_CAPTION, "version": 0}
 
 
 def milestones_for(config):
@@ -534,6 +564,25 @@ class Stamp(commands.Cog):
 
         return "ok", record, "\n".join(notes), bool(finished or reached), display
 
+    def card_caption(self, guild, member, config, count, completed):
+        template = (config.get("caption") or "").strip()
+        if not template:
+            return None
+        maximum = self.maximum_for(guild.id, config)
+        index, prize = next_milestone(config, count, maximum)
+        values = {
+            "user": member.mention,
+            "name": member.display_name,
+            "count": str(count),
+            "total": str(maximum),
+            "remaining": str(max(0, maximum - count)),
+            "completed": str(completed),
+            "next": str(index) if index else "",
+            "reward": prize or "",
+        }
+        text = templating.render(template, values, CAPTION_ALIASES, guild).strip()
+        return text[:CAPTION_LIMIT] or None
+
     def build_card(self, guild_id, member, count, completed, staff):
         """The card is just the stamp image, plus staff buttons.
 
@@ -564,6 +613,7 @@ class Stamp(commands.Cog):
             )
             return
         await ctx.send(
+            content=self.card_caption(ctx.guild, member, config, count, completed),
             file=file,
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -572,7 +622,8 @@ class Stamp(commands.Cog):
     async def refresh_card(
         self, interaction, member, count, completed, note="", complete=False, message=None
     ):
-        guild_id = interaction.guild.id if interaction is not None else message.guild.id
+        guild = interaction.guild if interaction is not None else message.guild
+        guild_id = guild.id
         file, view = self.build_card(guild_id, member, count, completed, True)
         if file is None:
             if interaction is not None:
@@ -582,12 +633,23 @@ class Stamp(commands.Cog):
                 )
             return
 
+        caption = self.card_caption(
+            guild, member, self.config_for(guild_id), count, completed
+        )
         if interaction is not None:
             await interaction.response.edit_message(
-                content=None, attachments=[file], view=view
+                content=caption,
+                attachments=[file],
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
-            await message.edit(content=None, attachments=[file], view=view)
+            await message.edit(
+                content=caption,
+                attachments=[file],
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     def collect_images(self, ctx):
         attachments = list(ctx.message.attachments)
@@ -867,6 +929,7 @@ class Stamp(commands.Cog):
         total = self.stage_count(ctx.guild.id, config)
         gaps, highest = self.missing_stages(ctx.guild.id, config)
         prefix = ctx.prefix
+        cap_state = "on" if (config.get("caption") or "").strip() else "off"
 
         if total >= 2:
             status = (
@@ -888,6 +951,7 @@ class Stamp(commands.Cog):
             "`" + prefix + "stamp setup upload` — attach the images in order, blank card first\n"
             "`" + prefix + "stamp setup image 3` — attach one image to replace a single stage\n"
             "`" + prefix + "stamp setup reward 8 free milk tea` — set a reward at any stamp number\n"
+            "`" + prefix + "stamp setup format` — caption shown above the card (" + cap_state + ")\n"
             "`" + prefix + "stamp preview 3` — preview a stage\n\n"
             "discord allows **10 attachments per message**, so longer cards need a "
             "__second__ upload. just run `" + prefix + "stamp setup upload` again with the "
@@ -1001,6 +1065,53 @@ class Stamp(commands.Cog):
 
         await embeds.send(
             ctx, embeds.notice("\n".join(lines)[:4000], title="Card images")
+        )
+
+    @setup.command(
+        name="format",
+        aliases=["caption", "text"],
+        description="Set the caption shown above the card. Use off to remove it.",
+    )
+    @app_commands.describe(text="Template with {fields}, or off to clear")
+    async def setup_format(self, ctx, *, text: str = None):
+        config = self.config_for(ctx.guild.id)
+
+        if text is None:
+            current = (config.get("caption") or "").strip() or "(none)"
+            fields = ", ".join("`{" + f + "}`" for f in CAPTION_FIELDS)
+            preview = templating.render(
+                config.get("caption") or "", CAPTION_SAMPLE, CAPTION_ALIASES, ctx.guild
+            ).strip() or "(nothing)"
+            body = (
+                "text shown above every stamp card.\n\n"
+                "**current**\n" + current + "\n\n"
+                "**preview**\n" + preview + "\n\n"
+                "**fields** " + fields + "\n\n"
+                "`" + ctx.prefix + "stamp setup format {user}, {count}/{total} stamps` sets it.\n"
+                "`" + ctx.prefix + "stamp setup format off` removes it."
+            )
+            await embeds.send(ctx, embeds.build(body[:4000], title="Card caption"))
+            return
+
+        value = "" if text.strip().lower() in BLOCK_WORDS else text.strip()[:CAPTION_LIMIT]
+
+        data = self.store.load()
+        block = self.guild_block(data, ctx.guild.id)
+        block["config"]["caption"] = value
+        self.store.save(data)
+
+        if not value:
+            await embeds.send(
+                ctx, embeds.notice("caption removed. cards show just the image now.")
+            )
+            return
+
+        preview = templating.render(
+            value, CAPTION_SAMPLE, CAPTION_ALIASES, ctx.guild
+        ).strip()
+        await embeds.send(
+            ctx,
+            embeds.notice("caption saved. preview:\n\n" + preview, title="Card caption"),
         )
 
     @setup.command(
