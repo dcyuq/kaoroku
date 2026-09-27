@@ -325,9 +325,25 @@ def can_update(member, order):
         or member.guild_permissions.manage_messages
     )
 
-def channel_name_for(status_text, opener):
-    raw = f"{status_text}-{opener}"
-    name = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+NAME_JOINER = "．"
+
+
+def slug_part(text):
+    return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+
+
+def slug_name(text):
+    return re.sub(r"[^a-z0-9._-]+", "", (text or "").lower()).strip("-")
+
+
+def channel_name_for(quantity, status_text, item, opener):
+    parts = [
+        slug_part(quantity),
+        slug_part(status_text),
+        slug_part(item),
+        slug_name(opener),
+    ]
+    name = NAME_JOINER.join(p for p in parts if p)
     return name[:100] or "ticket"
 
 async def rename_source(guild, settings, order):
@@ -338,7 +354,9 @@ async def rename_source(guild, settings, order):
     if channel is None:
         return
     name = channel_name_for(
+        order.get("quantity") or "",
         status_label(settings, order["status"]),
+        order.get("item") or "",
         order.get("opener_name") or "user",
     )
     if channel.name == name:
