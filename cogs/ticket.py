@@ -996,9 +996,9 @@ class TicketQuestionModal(discord.ui.Modal):
             field = discord.ui.TextInput(
                 label=question["label"][:45],
                 placeholder=question.get("placeholder"),
-                style=discord.TextStyle.paragraph,
+                style=discord.TextStyle.short,
                 required=question.get("required", True),
-                max_length=1000,
+                max_length=300,
             )
             self.inputs.append((question["label"], field))
             self.add_item(field)
